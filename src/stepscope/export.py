@@ -9,7 +9,7 @@ import base64
 import json
 from pathlib import Path
 
-from .server import VIEWER_DIR, episode_payload, run_payload, runs_payload
+from .server import VIEWER_DIR, episode_payload, run_payload, runs_payload, situation_index
 from .store import list_runs
 
 
@@ -41,7 +41,7 @@ def export_html(runs_root: str | Path, out: str | Path, runs: list[str] | None =
     used += len(json.dumps(_round(api)))
     for _, _, d, ep in sorted(queue, key=lambda q: q[:2]):
         ep_dir = d / "episodes" / ep
-        body = json.dumps(_round(episode_payload(ep_dir)), separators=(",", ":"))
+        body = json.dumps(_round(episode_payload(ep_dir, situation_index(d)), 2 if (ep_dir / "internals.npz").exists() else 4), separators=(",", ":"))
         png = ep_dir / "frames.png"
         uri = "data:image/png;base64," + base64.b64encode(png.read_bytes()).decode() if png.exists() else ""
         if used + len(body) + len(uri) > budget:

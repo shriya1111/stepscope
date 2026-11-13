@@ -165,11 +165,11 @@ function route() {
   clearInterval(playTimer); hideTip(); document.onkeydown = null; window.onresize = null;
   const app = $("app");
   if (!RUNS.length) { app.replaceChildren(el("div", { class: "empty" }, "No runs found. Create some with: stepscope demo")); return; }
-  const m = (STATIC ? ROUTE : location.hash).match(/^#\/run\/([^/]+)(?:\/ep\/([^/]+))?/);
+  const m = (STATIC ? ROUTE : location.hash).match(/^#\/run\/([^/]+)(?:\/ep\/([^/]+)(?:\/t\/(\d+))?)?/);
   const pick = RUNS.find((r) => r.name === "eval") || RUNS[0];
   const run = m && RUNS.some((r) => r.name === m[1]) ? m[1] : pick.name;
   $("runsel").value = run;
-  if (m && m[2]) episodeView(run, m[2]); else fleetView(run);
+  if (m && m[2]) episodeView(run, m[2], m[3] === undefined ? null : +m[3]); else fleetView(run);
 }
 
 /* ---------------- fleet view ---------------- */
@@ -223,6 +223,14 @@ async function fleetView(run) {
     parts.push(card);
   }
 
+  if (data.map && data.map.length) {
+    const card = el("div", { class: "card", style: "margin-top:14px" },
+      el("h2", {}, "Situation map · every decision the model made, placed by its internal representation"),
+      el("p", { class: "sub", style: "margin:0 0 8px;font-size:12px" }, "Nearby points are moments the model sees as similar. Click a point to open that step."));
+    card.append(situationMap(data.map, run));
+    parts.push(card);
+  }
+
   const filters = [["all", "All"], ["failed", "Failed"], ["flagged", "Alerted"], ["halted", "Halted"], ["gate", "Gate intervened"]];
   const seg = el("div", { class: "seg" });
   const tbody = el("tbody");
@@ -268,6 +276,32 @@ function barChart(bars, total) {
   return s;
 }
 
+function situationMap(points, run) {
+  const W = 760, H = 380, pad = 14;
+  const xs = points.map((p) => p.x), ys = points.map((p) => p.y);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+  const X = (v) => pad + (W - 2 * pad) * (v - x0) / (x1 - x0 || 1), Y = (v) => H - pad - (H - 2 * pad) * (v - y0) / (y1 - y0 || 1);
+  const wrap = el("div");
+  const s = svg("svg", { viewBox: `0 0 ${W} ${H}`, style: `max-width:${W}px`, role: "img", "aria-label": "Map of decision moments by model embedding" });
+  const pos = points.map((p) => [X(p.x), Y(p.y)]);
+  // failed episodes drawn on top so they are not buried
+  for (const pass of [true, false]) points.forEach((p, i) => { if ((p.success === true) === pass) s.append(svg("circle", { cx: pos[i][0], cy: pos[i][1], r: 2.6, fill: pass ? "var(--s1)" : "var(--s2)", "fill-opacity": pass ? .45 : .8 })); });
+  const ring = svg("circle", { r: 6, fill: "none", stroke: "var(--text)", "stroke-width": 2, visibility: "hidden" });
+  const hit = svg("rect", { x: 0, y: 0, width: W, height: H, fill: "transparent", style: "cursor:pointer" });
+  let near = -1;
+  hit.addEventListener("pointermove", (ev) => {
+    const r = s.getBoundingClientRect(), mx = (ev.clientX - r.left) * W / r.width, my = (ev.clientY - r.top) * H / r.height;
+    let best = 1e9; pos.forEach(([a, b], i) => { const d = (a - mx) ** 2 + (b - my) ** 2; if (d < best) { best = d; near = i; } });
+    const p = points[near]; ring.setAttribute("cx", pos[near][0]); ring.setAttribute("cy", pos[near][1]); ring.setAttribute("visibility", "visible");
+    showTip(ev, [[p.ep + " · step " + p.t, ""], [p.success ? "succeeded" : "failed", "episode outcome"]]);
+  });
+  hit.addEventListener("pointerleave", () => { ring.setAttribute("visibility", "hidden"); hideTip(); });
+  hit.addEventListener("click", () => { if (near >= 0) nav(`#/run/${run}/ep/${points[near].ep}/t/${points[near].t}`); });
+  s.append(ring, hit);
+  wrap.append(el("div", { class: "legend", style: "margin:0 0 6px" }, el("span", {}, el("i", { style: "background:var(--s1)" }), "moment in an episode that succeeded"), el("span", {}, el("i", { style: "background:var(--s2)" }), "moment in an episode that failed")), s);
+  return wrap;
+}
+
 /* ---------------- episode view ---------------- */
 const METRIC_CHARTS = [
   ["sample_spread", "Sample spread", "how much the policy's sampled actions differ"],
@@ -276,9 +310,17 @@ const METRIC_CHARTS = [
   ["net_speed", "Net progress per step", "distance actually covered over the recent window"],
   ["plan_regressions", "Plan regressions", "times the policy went back to an earlier subtask"],
 ];
+const BUILTIN = new Set(["sample_spread", "sample_spread_ema", "direction_disagreement", "direction_disagreement_ema", "action_jerk", "action_jerk_ema",
+  "reversal_rate", "path_efficiency", "net_speed", "plan_regressions", "subgoal_dwell", "gate_interventions", "elapsed"]);
+const EXTRA_TITLES = {
+  plan_shift: ["Plan shift", "how far each new plan moved from what the last plan predicted (px)"],
+  n_modes: ["Options considered", "number of distinct groups among the sampled plans"],
+  top_mode_share: ["Share of plans behind the executed option", "1 = every sampled plan agrees"],
+  final_spread: ["Spread between sampled plans", "after denoising (px)"],
+};
 const SERIES = ["--s1", "--s2", "--s3", "--s4", "--s5", "--s6", "--s7"];
 
-async function episodeView(run, epId) {
+async function episodeView(run, epId, startStep) {
   const app = $("app");
   let data;
   try { data = await api(`runs/${encodeURIComponent(run)}/episodes/${encodeURIComponent(epId)}`); }
@@ -286,7 +328,12 @@ async function episodeView(run, epId) {
   const runInfo = await api("runs/" + encodeURIComponent(run));
   const { meta, steps } = data, n = meta.n_steps, alertCfg = runInfo.run.alert;
   const ids = runInfo.episodes.map((e) => e.episode_id), at = ids.indexOf(epId);
-  let cur = meta.first_alert_step ?? 0;
+  let cur = startStep ?? meta.first_alert_step ?? 0;
+  const decisions = data.decisions ? data.decisions.decisions : null;
+  const overlay = runInfo.run.overlay || {};
+  const decisionAt = (t) => { let d = null; if (decisions) for (const q of decisions) { if (q.t <= t) d = q; else break; } return d; };
+  const show = { plans: true, points: true };
+  const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
   const updaters = [];
 
   // --- camera ---
@@ -299,6 +346,26 @@ async function episodeView(run, epId) {
     const i = Math.min(t, f.count - 1);
     ctx.imageSmoothingEnabled = false;
     ctx.drawImage(img, (i % f.columns) * f.width, Math.floor(i / f.columns) * f.height, f.width, f.height, 0, 0, cam.width, cam.height);
+    const d = decisionAt(t);
+    if (!d) return;
+    if (show.points && d.keypoints) {
+      const k = cam.width / f.width;
+      for (const [x, y] of d.keypoints) {
+        ctx.beginPath(); ctx.arc(x * k, y * k, 3, 0, 6.3); ctx.fillStyle = "#fff"; ctx.fill();
+        ctx.beginPath(); ctx.arc(x * k, y * k, 1.8, 0, 6.3); ctx.fillStyle = css("--s7"); ctx.fill();
+      }
+    }
+    if (show.plans && overlay.plan_extent) {
+      const k = cam.width / overlay.plan_extent;
+      const draw = (plan, color, width) => {
+        ctx.beginPath(); plan.forEach(([x, y], j) => (j ? ctx.lineTo(x * k, y * k) : ctx.moveTo(x * k, y * k)));
+        ctx.lineJoin = "round"; ctx.lineCap = "round"; ctx.strokeStyle = color; ctx.lineWidth = width; ctx.stroke();
+      };
+      for (let j = d.plans.length - 1; j >= 0; j--) {  // executed plan (index 0) drawn last, on top
+        if (j === 0) draw(d.plans[j], "#fff", 5.5);
+        draw(d.plans[j], css(SERIES[d.modes[j] % SERIES.length]), j === 0 ? 3 : 1.5);
+      }
+    }
   }
   const stepno = el("span", { class: "stepno" });
   const playBtn = el("button", { onclick: () => {
@@ -324,6 +391,44 @@ async function episodeView(run, epId) {
     el("dt", {}, "First alert"), el("dd", {}, meta.first_alert_step === null ? (alertCfg ? "none" : "no predictor on this run") : `step ${meta.first_alert_step} of ${n - 1} (${n - 1 - meta.first_alert_step} steps before the end)`),
     el("dt", {}, "Symptoms at alert"), el("dd", {}, (meta.causes || []).length ? causes : "–"),
     sim && sim.cause ? [el("dt", {}, "Simulator ground truth"), el("dd", {}, sim.cause)] : null);
+
+  // --- what the model is deciding ---
+  let decidingCard = null, decideBody = null, lastDecision = undefined;
+  if (decisions) {
+    const toggle = (key, label) => { const id = "show-" + key; const box = el("input", { type: "checkbox", id, ...(show[key] ? { checked: "" } : {}) });
+      box.onchange = () => { show[key] = box.checked; drawFrame(cur); }; return el("label", { for: id, style: "display:inline-flex;gap:6px;align-items:center" }, box, label); };
+    decideBody = el("div");
+    decidingCard = el("div", { class: "card", style: "margin-bottom:14px" },
+      el("div", { class: "row", style: "margin:0 0 8px" }, el("h2", { style: "margin:0" }, "What the model is deciding"), el("span", { style: "flex:1" }),
+        overlay.plan_extent ? toggle("plans", "Draw sampled plans") : null, toggle("points", "Draw attention points")),
+      decideBody);
+  }
+  function renderDecision(d) {
+    if (!decideBody || d === lastDecision) return;
+    lastDecision = d;
+    if (!d) { decideBody.replaceChildren(el("p", { class: "sub", style: "margin:0" }, "No decision yet at this step.")); return; }
+    const sizes = {}; d.modes.forEach((m) => { sizes[m] = (sizes[m] || 0) + 1; });
+    const options = Object.entries(sizes).map(([m, c]) => el("span", { class: "chip" + (+m === d.modes[0] ? " lead" : "") },
+      el("i", { style: `display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:6px;background:var(${SERIES[m % SERIES.length]})` }),
+      `Option ${String.fromCharCode(65 + +m)}: ${c} of ${d.modes.length} plans` + (+m === d.modes[0] ? " · executed" : "")));
+    const near = (d.neighbours || []).map((nb) => { const b = el("button", { style: "padding:1px 9px;border-radius:999px;font-size:12px", onclick: () => nav(`#/run/${run}/ep/${nb.ep}/t/${nb.t}`) },
+      `${nb.ep} step ${nb.t} · ${nb.success ? "succeeded" : "failed"}`); return b; });
+    const kids = [el("p", { style: "margin:0 0 10px" }, d.summary),
+      el("dl", {}, el("dt", {}, "Decision made at"), el("dd", {}, "step " + d.t),
+        el("dt", {}, "Options considered"), el("dd", {}, el("div", { class: "chips" }, options)),
+        near.length ? [el("dt", {}, "Most similar past moments"), el("dd", {}, el("div", { class: "chips" }, near))] : null)];
+    if (d.denoise_spread) {
+      const v = d.denoise_spread, W = 300, H = 74, L0 = 40, x = (i) => L0 + (W - L0 - 10) * i / (v.length - 1), hi = Math.max(...v) * 1.08, y = (q) => 58 - 50 * q / hi;
+      const s = svg("svg", { viewBox: `0 0 ${W} ${H}`, style: "max-width:300px;margin-top:10px", role: "img", "aria-label": "Disagreement between sampled plans after each denoising step" });
+      for (const g of [0, hi / 2, hi]) { s.append(svg("line", { x1: L0, x2: W - 10, y1: y(g), y2: y(g), stroke: "var(--grid)" })); s.append(svg("text", { x: L0 - 6, y: y(g) + 4, "text-anchor": "end" }, g.toFixed(0))); }
+      s.append(svg("path", { d: v.map((q, i) => (i ? "L" : "M") + x(i) + "," + y(q)).join(""), fill: "none", stroke: "var(--s1)", "stroke-width": 2, "stroke-linejoin": "round" }));
+      v.forEach((q, i) => { s.append(svg("circle", { cx: x(i), cy: y(q), r: 4, fill: "var(--s1)", stroke: "var(--surface)", "stroke-width": 2 })); s.append(svg("text", { x: x(i), y: H - 2, "text-anchor": "middle" }, i + 1));
+        const hit = svg("rect", { x: x(i) - 14, y: 0, width: 28, height: H, fill: "transparent" });
+        hit.addEventListener("pointermove", (ev) => showTip(ev, [[q.toFixed(1) + " px", "spread between sampled plans"], ["denoising step " + (i + 1), ""]])); hit.addEventListener("pointerleave", hideTip); s.append(hit); });
+      kids.push(el("div", { class: "ct", style: "margin:12px 0 0;font-size:12px;color:var(--text-2)" }, el("b", { style: "color:var(--text)" }, "Plans forming out of noise"), " · spread between sampled plans (px) after each denoising step"), s);
+    }
+    decideBody.replaceChildren(...kids.flat().filter(Boolean));
+  }
 
   // --- charts ---
   const chartsCard = el("div", { class: "card" }, el("h2", {}, "Step timeline · hover or use ← → to scrub"));
@@ -417,10 +522,13 @@ async function episodeView(run, epId) {
       finish(c, (t) => [[steps.verdict[t], "gate verdict"], ...steps.violations[t].map((v) => [v.constraint, v.detail])]);
     }
 
-    for (const [key, title, sub] of METRIC_CHARTS) {
+    if (steps.reward && steps.reward.some((q) => q !== null)) line("Reward", "task progress reported by the environment", steps.reward, {});
+    const extra = Object.keys(steps.metrics).filter((k) => !BUILTIN.has(k) && k !== "commit_step").map((k) => [k, EXTRA_TITLES[k] ? EXTRA_TITLES[k][0] : k.replaceAll("_", " "), EXTRA_TITLES[k] ? EXTRA_TITLES[k][1] : "custom signal"]);
+    for (const [key, title, sub] of [...METRIC_CHARTS, ...extra]) {
       const v = steps.metrics[key];
       if (v && v.some((q) => q !== null)) line(title, sub, v, key === "direction_disagreement" || key === "reversal_rate" ? { min: 0, max: 1 }
-        : key === "plan_regressions" ? { min: 0, max: Math.max(2, 2 * Math.ceil(Math.max(...v.filter((q) => q !== null)) / 2)) } : {});
+        : key === "top_mode_share" ? { min: 0, max: 1 }
+        : key === "plan_regressions" || key === "n_modes" ? { min: 0, max: Math.max(2, 2 * Math.ceil(Math.max(...v.filter((q) => q !== null)) / 2)) } : {});
     }
     setStep(cur);
   }
@@ -428,6 +536,7 @@ async function episodeView(run, epId) {
   function setStep(t) {
     cur = Math.max(0, Math.min(n - 1, t));
     drawFrame(cur);
+    renderDecision(decisionAt(cur));
     stepno.textContent = `step ${cur} / ${n - 1}`;
     const b = steps.belief[cur] || {};
     dd["Subtask"].textContent = b.subtask ?? "–";
@@ -450,7 +559,7 @@ async function episodeView(run, epId) {
     el("div", { class: "ep-top" },
       el("div", { class: "card" }, cam, controls),
       el("div", { class: "card" }, el("h2", {}, "Episode"), summary, el("h2", {}, "At the selected step"), readout)),
-    chartsCard);
+    decidingCard, chartsCard);
   build();
   let rz; window.onresize = () => { clearTimeout(rz); rz = setTimeout(build, 120); };
   document.onkeydown = (ev) => {

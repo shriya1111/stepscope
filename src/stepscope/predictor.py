@@ -36,6 +36,8 @@ SYMPTOMS = [
     ("stuck on a subgoal", "behaviour", [("subgoal_dwell", 1)]),
     ("fighting the gate", "behaviour", [("gate_interventions", 1)]),
     ("plan keeps changing", "behaviour", [("plan_shift", 1)]),
+    ("torn between options", "factor", [("n_modes", 1)]),
+    ("sampled plans far apart", "factor", [("final_spread", 1)]),
     ("policy uncertainty", "factor", [("sample_spread_ema", 1)]),
     ("indecision between actions", "factor", [("direction_disagreement_ema", 1)]),
     ("unfamiliar state", "factor", [("novelty", 1)]),
@@ -89,6 +91,9 @@ class Predictor:
         self.novelty_mean: np.ndarray | None = None
         self.novelty_prec: np.ndarray | None = None
         self.info: dict = {}
+        # Name of an `internals` key (e.g. "embedding") to measure novelty on,
+        # instead of the raw state. Set before fit().
+        self.novelty_source: str | None = None
 
     # ---------- featurisation ----------
     def novelty(self, states: np.ndarray) -> np.ndarray:
@@ -217,6 +222,7 @@ class Predictor:
             "novelty_mean": None if self.novelty_mean is None else self.novelty_mean.tolist(),
             "novelty_prec": None if self.novelty_prec is None else self.novelty_prec.tolist(),
             "info": self.info,
+            "novelty_source": self.novelty_source,
         }
 
     def save(self, path: str | Path) -> None:
@@ -231,6 +237,7 @@ class Predictor:
         if d.get("novelty_mean") is not None:
             p.novelty_mean, p.novelty_prec = np.array(d["novelty_mean"]), np.array(d["novelty_prec"])
         p.info = d.get("info", {})
+        p.novelty_source = d.get("novelty_source")
         return p
 
     @classmethod

@@ -1,4 +1,4 @@
-"""Command line: stepscope demo | collect | train | evaluate | serve | export."""
+"""Command line: stepscope demo | collect | train | evaluate | serve | export | export-dataset | situations."""
 
 from __future__ import annotations
 
@@ -126,6 +126,22 @@ def cmd_export(args: argparse.Namespace) -> None:
     print(f"Wrote {args.out} ({r['bytes'] / 1e6:.1f} MB): step data for {r['episodes_with_steps']} of {r['episodes_total']} episodes")
 
 
+def cmd_export_dataset(args: argparse.Namespace) -> None:
+    from .rl import LABELS, export_dataset
+
+    r = export_dataset(args.run, args.out)
+    print(f"Wrote {args.out}: {r['rows']} transitions from {r['episodes']} episodes")
+    for label, n in r["labels"].items():
+        print(f"  {label:18s} {n:6d}  weight {LABELS[label][1]:.1f}  {LABELS[label][0]}")
+
+
+def cmd_situations(args: argparse.Namespace) -> None:
+    from .rl import export_situations
+
+    sits = export_situations(args.run, args.out, lead=args.lead, include_successes=args.include_successes)
+    print(f"Wrote {args.out}: {len(sits)} restart points ({args.lead} steps before each alert or risk peak)")
+
+
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="stepscope", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -169,6 +185,18 @@ def main(argv: list[str] | None = None) -> None:
     x.add_argument("--only", nargs="*", help="run names to include (default: all)")
     x.add_argument("--max-mb", type=float, default=14.0)
     x.set_defaults(fn=cmd_export)
+
+    ds = sub.add_parser("export-dataset", help="write traces as RL transitions with labels and weights")
+    ds.add_argument("--run", required=True)
+    ds.add_argument("--out", default="dataset.parquet")
+    ds.set_defaults(fn=cmd_export_dataset)
+
+    si = sub.add_parser("situations", help="save restart points from just before failures")
+    si.add_argument("--run", required=True)
+    si.add_argument("--out", default="situations.json")
+    si.add_argument("--lead", type=int, default=8, help="how many steps before the alert to restart from")
+    si.add_argument("--include-successes", action="store_true")
+    si.set_defaults(fn=cmd_situations)
 
     args = p.parse_args(argv)
     args.fn(args)

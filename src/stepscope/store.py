@@ -67,7 +67,24 @@ def dump_json(path: Path, obj: Any) -> None:
     path.write_text(json.dumps(_jsonable(obj), indent=2))
 
 
-def write_episode(ep_dir: Path, rows: list[dict], frames: list[np.ndarray], meta: dict) -> None:
+def forward_fill(ts, values: np.ndarray, n_steps: int) -> np.ndarray:
+    """Spread values recorded at steps `ts` over every step (each holds until the next)."""
+    idx = np.clip(np.searchsorted(np.asarray(ts), np.arange(n_steps), side="right") - 1, 0, len(ts) - 1)
+    return np.asarray(values)[idx]
+
+
+def read_internals(run_dir: Path, episode_id: str) -> dict[str, np.ndarray]:
+    """Arrays logged via `internals=`. For each key K: K (stacked values) and K__t (their steps)."""
+    p = Path(run_dir) / "episodes" / episode_id / "internals.npz"
+    if not p.exists():
+        return {}
+    with np.load(p) as z:
+        return {k: z[k] for k in z.files}
+
+
+def write_episode(
+    ep_dir: Path, rows: list[dict], frames: list[np.ndarray], meta: dict, internals: dict | None = None
+) -> None:
     ep_dir.mkdir(parents=True, exist_ok=True)
     df = pd.DataFrame(rows)
     for col in ("belief", "violations"):
@@ -78,6 +95,13 @@ def write_episode(ep_dir: Path, rows: list[dict], frames: list[np.ndarray], meta
         h, w, _ = frames[0].shape
         meta = {**meta, "frames": {"count": len(frames), "width": w, "height": h, "columns": SPRITE_COLUMNS}}
         (ep_dir / "frames.png").write_bytes(encode_png(make_sprite(frames)))
+    if internals:
+        arrays = {}
+        for key, (ts, vals) in internals.items():
+            arrays[key] = np.stack(vals)
+            arrays[f"{key}__t"] = np.asarray(ts, dtype=np.int32)
+        np.savez_compressed(ep_dir / "internals.npz", **arrays)
+        meta = {**meta, "internals": sorted(internals)}
     dump_json(ep_dir / "meta.json", meta)
 
 

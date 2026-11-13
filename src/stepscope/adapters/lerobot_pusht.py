@@ -13,6 +13,7 @@ Three things differ from the stock LeRobot evaluation, all to make CPU runs
 practical and the traces richer:
   * DDIM sampling with 10 steps instead of DDPM with 100
   * N chunks are sampled per decision (the first one is executed)
+  * model internals are captured at each decision (see DiffusionPushTPolicy.decide)
   * normalisation constants are read from the checkpoint file itself
 """
 
@@ -25,6 +26,7 @@ from pathlib import Path
 
 import numpy as np
 
+from ..explain import commit_step, plan_modes
 from ..gate import Gate
 from ..metrics import TraceConfig
 from ..predictor import Predictor
@@ -40,7 +42,9 @@ GATE_CONFIG = {
     "constraints": [{"type": "workspace_box", "name": "workspace", "low": [0, 0], "high": [512, 512]}],
 }
 # Extra per-step signal this adapter logs, on top of the built-in metrics.
-EXTRA_FEATURES = ["plan_shift"]
+EXTRA_FEATURES = ["plan_shift", "n_modes", "top_mode_share", "commit_step", "final_spread"]
+# Sampled plans closer than this (mean point distance, pixels of a 512 px workspace) count as one option.
+MODE_THRESHOLD_PX = 30.0
 
 
 class DiffusionPushTPolicy:
@@ -76,6 +80,11 @@ class DiffusionPushTPolicy:
         self.img_std = g("normalize_inputs.buffer_observation_image.std").view(3, 1, 1)
         self.s_min, self.s_max = g("normalize_inputs.buffer_observation_state.min"), g("normalize_inputs.buffer_observation_state.max")
         self.a_min, self.a_max = g("unnormalize_outputs.buffer_action.min"), g("unnormalize_outputs.buffer_action.max")
+        # The vision encoder ends in a spatial softmax: 32 (x, y) image points. Capture them.
+        self._keypoints = None
+        diffusion.rgb_encoder.pool.register_forward_hook(
+            lambda _m, _i, out: setattr(self, "_keypoints", out.detach().numpy().copy())
+        )
 
     def reset(self, seed: int, obs: dict) -> None:
         self.torch.manual_seed(seed)
@@ -85,11 +94,18 @@ class DiffusionPushTPolicy:
     def observe(self, obs: dict) -> None:
         self.history.append(obs)
 
-    def sample_chunks(self) -> tuple[np.ndarray, float]:
-        """Returns (chunks [N, n_exec, 2] of target positions, plan_shift).
+    def decide(self) -> dict:
+        """Run the model once. Returns:
 
-        plan_shift: how far the new plan moved from what the previous plan
-        predicted for the same timesteps (pixels). NaN on the first decision.
+        chunks        (N, n_exec, 2) target positions for the next steps; chunks[0] is executed
+        plan_shift    how far the new plan moved from what the previous plan predicted (px)
+        internals     arrays from inside the model, for the viewer and for training data:
+            plans           (N, horizon, 2) every sampled plan, in pixels
+            modes           (N,) which option each sampled plan belongs to
+            keypoints       (32, 2) image points the vision encoder's last layer attends to
+            embedding       the vector the action head is conditioned on
+            denoise_spread  (n_denoise,) disagreement between samples after each denoising step (px)
+            denoise_path    (n_denoise, horizon, 2) the executed plan forming out of noise
         """
         torch = self.torch
         img = torch.stack([torch.from_numpy(o["pixels"]).permute(2, 0, 1).float() / 255 for o in self.history])
@@ -97,11 +113,23 @@ class DiffusionPushTPolicy:
         state = torch.stack([torch.from_numpy(o["agent_pos"]).float() for o in self.history])
         state = (state - self.s_min) / (self.s_max - self.s_min) * 2 - 1
         batch = {"observation.state": state[None], "observation.images": img[None, :, None]}
+        unnorm = lambda a: (a + 1) / 2 * (self.a_max - self.a_min) + self.a_min
         with torch.no_grad():
             diffusion = self.policy.diffusion
             cond = diffusion._prepare_global_conditioning(batch)  # image encoder runs once
-            horizon = diffusion.conditional_sample(self.n_samples, global_cond=cond.expand(self.n_samples, -1))
-        horizon = ((horizon + 1) / 2 * (self.a_max - self.a_min) + self.a_min).numpy()
+            # Same loop as DiffusionModel.conditional_sample, but keeping the intermediate steps.
+            n = self.n_samples
+            sample = torch.randn(n, diffusion.config.horizon, 2)
+            diffusion.noise_scheduler.set_timesteps(diffusion.num_inference_steps)
+            gc = cond.expand(n, -1)
+            spread, path = [], []
+            for t in diffusion.noise_scheduler.timesteps:
+                out = diffusion.unet(sample, torch.full((n,), int(t), dtype=torch.long), global_cond=gc)
+                sample = diffusion.noise_scheduler.step(out, t, sample).prev_sample
+                px = unnorm(sample)
+                spread.append(float(px.std(dim=0).mean()))
+                path.append(px[0].numpy().copy())
+        horizon = unnorm(sample).numpy()
         start = self.n_obs - 1
         chunks = horizon[:, start : start + self.n_exec]
         overlap = horizon.shape[1] - (start + self.n_exec)
@@ -109,7 +137,19 @@ class DiffusionPushTPolicy:
         if self.prev_tail is not None and overlap > 0:
             shift = float(np.linalg.norm(horizon[0, start : start + overlap] - self.prev_tail, axis=1).mean())
         self.prev_tail = horizon[0, start + self.n_exec :].copy()
-        return chunks, shift
+        # Keypoints come out in [-1, 1] over the centre crop the encoder sees.
+        crop = self.policy.config.crop_shape or (96, 96)
+        size = self.history[-1]["pixels"].shape[0]
+        kp = (self._keypoints[-1] + 1) / 2 * np.array([crop[1], crop[0]]) + (size - np.array([crop[1], crop[0]])) / 2
+        internals = {
+            "plans": horizon.astype(np.float32),
+            "modes": plan_modes(chunks, MODE_THRESHOLD_PX),
+            "keypoints": kp.astype(np.float32),
+            "embedding": cond[0].numpy().astype(np.float32),
+            "denoise_spread": np.array(spread, np.float32),
+            "denoise_path": np.stack(path).astype(np.float32),
+        }
+        return {"chunks": chunks, "plan_shift": shift, "internals": internals}
 
 
 def rollout(env, policy: DiffusionPushTPolicy, tracer: Tracer, seed: int) -> dict:
@@ -118,8 +158,18 @@ def rollout(env, policy: DiffusionPushTPolicy, tracer: Tracer, seed: int) -> dic
     success, reason, best = False, "timeout", 0.0
     with tracer.episode(task=TASK, meta={"seed": seed}) as ep:
         done = False
+        reward = None
         while not done:
-            chunks, shift = policy.sample_chunks()
+            d = policy.decide()
+            chunks, z = d["chunks"], d["internals"]
+            sizes = np.bincount(z["modes"])
+            signals = {
+                "plan_shift": d["plan_shift"],
+                "n_modes": float(len(sizes)),
+                "top_mode_share": float(sizes[0] / sizes.sum()),
+                "commit_step": float(commit_step(z["denoise_spread"])),
+                "final_spread": float(z["denoise_spread"][-1]),
+            }
             for k in range(chunks.shape[1]):
                 pos = obs["agent_pos"].astype(float)
                 # The policy outputs absolute targets; trace them as moves from the current position.
@@ -129,7 +179,10 @@ def rollout(env, policy: DiffusionPushTPolicy, tracer: Tracer, seed: int) -> dic
                     action_samples=chunks[:, k] - pos,
                     frame=obs["pixels"],
                     belief={"chunk_step": k, "target": [round(float(v), 1) for v in chunks[0, k]]},
-                    signals={"plan_shift": shift},
+                    signals=signals,
+                    reward=reward,
+                    internals=z if k == 0 else None,
+                    snapshot=np.concatenate([info["pos_agent"], info["block_pose"]]),
                 )
                 if decision.halt:
                     reason, done = "halted_by_gate", True
@@ -142,7 +195,8 @@ def rollout(env, policy: DiffusionPushTPolicy, tracer: Tracer, seed: int) -> dic
                     reason = "success" if success else "timeout"
                     done = True
                     break
-        return ep.end(success=success, reason=reason, meta={"sim": {"best_coverage": best, "cause": None}})
+        final = None if reason == "halted_by_gate" else reward
+        return ep.end(success=success, reason=reason, meta={"sim": {"best_coverage": best, "cause": None}}, final_reward=final)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -165,7 +219,11 @@ def main(argv: list[str] | None = None) -> None:
         config=TRACE_CONFIG,
         gate=Gate(GATE_CONFIG),
         predictor=Predictor.load(args.model) if args.model else None,
-        run_meta={"label": f"LeRobot diffusion policy on PushT ({REPO}), DDIM {args.ddim_steps} steps, {args.samples} samples"},
+        run_meta={
+            "label": f"LeRobot diffusion policy on PushT ({REPO}), DDIM {args.ddim_steps} steps, {args.samples} samples",
+            # Tells the viewer how to draw plans (workspace units) over the camera frame.
+            "overlay": {"plan_extent": 512},
+        },
     )
     done = sum(1 for _ in (Path(args.run) / "episodes").iterdir())  # resume where a previous call stopped
     wins = 0

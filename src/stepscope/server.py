@@ -10,7 +10,8 @@ import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 
-from .store import list_episodes, list_runs, read_run_meta, read_steps
+from .explain import SituationIndex, describe_decision
+from .store import list_episodes, list_runs, read_internals, read_run_meta, read_steps
 
 _NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 VIEWER_DIR = Path(__file__).parent / "viewer"
@@ -46,15 +47,62 @@ def run_payload(d: Path) -> dict:
         "report": _read_json(d / "report.json"),
         "gated_report": _read_json(d / "gated_report.json"),
         "episodes": list_episodes(d),
+        "map": situation_index(d).points(),
     }
 
 
-def episode_payload(d: Path) -> dict:
+_INDEX_CACHE: dict = {}
+
+
+def situation_index(run_dir: Path) -> SituationIndex:
+    """Embedding index for a run, rebuilt when episodes are added."""
+    key = (str(run_dir), sum(1 for _ in (run_dir / "episodes").iterdir()))
+    if key not in _INDEX_CACHE:
+        _INDEX_CACHE.clear()
+        _INDEX_CACHE[key] = SituationIndex(run_dir)
+    return _INDEX_CACHE[key]
+
+
+def decisions_payload(d: Path, index: SituationIndex | None = None) -> dict | None:
+    """What the model was deciding, at each step where it ran (None if no internals were logged)."""
+    z = read_internals(d.parent.parent, d.name)
+    if "plans" not in z:
+        return None
+    index = index or situation_index(d.parent.parent)
+    near = index.neighbours(d.name)
+    xy = {}
+    if not index.empty:
+        mine = index.episodes == d.name
+        xy = {int(t): [float(a), float(b)] for t, (a, b) in zip(index.steps[mine], index.xy[mine])}
+    out = []
+    for i, t in enumerate(z["plans__t"].tolist()):
+        modes = z["modes"][i].tolist() if "modes" in z else [0] * len(z["plans"][i])
+        spread = z["denoise_spread"][i].tolist() if "denoise_spread" in z else None
+        nb = near.get(t, [])
+        out.append(
+            {
+                "t": t,
+                "plans": z["plans"][i].tolist(),
+                "modes": modes,
+                "keypoints": z["keypoints"][i].tolist() if "keypoints" in z else None,
+                "denoise_spread": spread,
+                "denoise_path": z["denoise_path"][i][:, ::3].tolist() if "denoise_path" in z else None,
+                "map": xy.get(t),
+                "neighbours": nb,
+                "summary": describe_decision(len(modes), np.bincount(modes).tolist(), spread[-1] if spread else None, nb),
+            }
+        )
+    return {"decisions": out}
+
+
+def episode_payload(d: Path, index: SituationIndex | None = None) -> dict:
     df = read_steps(d.parent.parent, d.name)
     return {
+        "decisions": decisions_payload(d, index),
         "meta": _read_json(d / "meta.json"),
         "steps": {
             "risk": _clean(df["risk"].tolist()),
+            "reward": _clean(df["reward"].tolist()) if "reward" in df else None,
             "verdict": df["verdict"].tolist(),
             "violations": [json.loads(v) for v in df["violations"]],
             "belief": [json.loads(v) for v in df["belief"]],
