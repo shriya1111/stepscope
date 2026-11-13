@@ -36,7 +36,10 @@ def export_html(runs_root: str | Path, out: str | Path, runs: list[str] | None =
         api[f"runs/{d.name}"] = payload
         for i, e in enumerate(payload["episodes"]):
             interesting = e["success"] is not True or e["first_alert_step"] is not None
-            queue.append((0 if interesting else 1, i, d, e["episode_id"]))
+            if e.get("deepdives"):
+                interesting = True
+                i = -1  # episodes with deep dives go first
+            queue.append((-1 if i < 0 else 0 if interesting else 1, i, d, e["episode_id"]))
     budget, used, included = max_mb * 1e6, 0, 0
     used += len(json.dumps(_round(api)))
     for _, _, d, ep in sorted(queue, key=lambda q: q[:2]):

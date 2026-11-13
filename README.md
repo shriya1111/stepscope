@@ -136,6 +136,56 @@ pip install "lerobot[diffusion,pusht]"
 python -m stepscope.adapters.lerobot_pusht --run runs/pusht --episodes 40
 ```
 
+## Deep dives: how did the model get to this action?
+
+For chosen decisions, stepscope restores the saved environment state, re-runs the
+real model with fixed starting noise, and stores four analyses the viewer shows
+as tabs:
+
+- **Decision debugger**: the plan the model would output if it stopped after
+  each denoising step. Drag a slider to watch the decision form.
+- **Cause map**: hide each patch of the camera image and measure how far the
+  plan moves; also remove whole inputs (camera, robot position, motion).
+- **What-if**: move or turn the block, or move the pusher, and see the new plan
+  next to the original.
+- **Predicted futures**: play every sampled plan forward in a copy of the
+  simulator and report predicted progress and closest approach to hazards.
+
+```bash
+python -m stepscope.adapters.pusht_deepdive --run runs/pusht --auto 3 --every 4 --scene examples/pusht_scene.yaml
+```
+
+The what-if edits are a fixed set computed ahead of time, not free-form
+editing in the browser. The model-agnostic parts are in `src/stepscope/deepdive.py`;
+the PushT-specific forward passes are in `src/stepscope/adapters/pusht_deepdive.py`.
+
+## Environment-aware safety
+
+Declare what is around the robot in a scene file (`examples/pusht_scene.yaml`):
+hazards with a position, size and severity class. Then score every traced step:
+
+```bash
+stepscope safety --run runs/pusht --scene examples/pusht_scene.yaml
+```
+
+For each step this looks at where the sampled plans would take the robot and
+records clearance, time to contact, chance of contact (the share of sampled
+plans that touch the hazard), severity, and a combined risk:
+chance of contact x severity weight x speed factor. The viewer draws the hazards
+on the camera frame and adds safety-risk and clearance timelines.
+
+**Shield.** With `--shield`, the PushT harness predicts the future of every
+sampled plan in a simulator copy and executes the one with the best predicted
+outcome that stays clear of hazards (`safety.choose_plan`):
+
+```bash
+python -m stepscope.adapters.lerobot_pusht --run runs/pusht-shield --episodes 30 --shield --scene examples/pusht_scene.yaml
+```
+
+Limits: hazards come from a file, not from a detector on the camera feed; the
+simulator stands in for a world model, which a real robot would need; the risk
+formula is a transparent heuristic, not a certified hazard analysis.
+
 ## Training data from traces
 
 ```bash

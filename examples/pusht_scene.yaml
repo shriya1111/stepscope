@@ -1,0 +1,10 @@
+# Hazards around the PushT table, in workspace pixels (512 x 512).
+# In a deployment this list would come from a detector on the camera feed.
+# The pretrained policy was never trained with these and cannot see them.
+extent: 512
+robot_radius: 15        # pusher radius
+speed_ref: 20           # pixels per step treated as full speed
+proximity_scale: 25     # pixels
+hazards:
+  - {name: operator hand, kind: person, center: [120, 395], radius: 45, severity: 3}
+  - {name: glass, kind: fragile, center: [400, 135], radius: 30, severity: 2}

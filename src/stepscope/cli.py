@@ -142,6 +142,13 @@ def cmd_situations(args: argparse.Namespace) -> None:
     print(f"Wrote {args.out}: {len(sits)} restart points ({args.lead} steps before each alert or risk peak)")
 
 
+def cmd_safety(args: argparse.Namespace) -> None:
+    from .safety import Scene, annotate_run
+
+    t = annotate_run(args.run, Scene.from_file(args.scene))
+    print(f"Scored {t['steps']} steps in {t['episodes']} episodes: {t['high']} at high risk, {t['medium']} at medium, {t['contacts']} inside a hazard zone")
+
+
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="stepscope", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -197,6 +204,11 @@ def main(argv: list[str] | None = None) -> None:
     si.add_argument("--lead", type=int, default=8, help="how many steps before the alert to restart from")
     si.add_argument("--include-successes", action="store_true")
     si.set_defaults(fn=cmd_situations)
+
+    sf = sub.add_parser("safety", help="score every traced step against a scene of hazards")
+    sf.add_argument("--run", required=True)
+    sf.add_argument("--scene", required=True, help="YAML scene file (see examples/pusht_scene.yaml)")
+    sf.set_defaults(fn=cmd_safety)
 
     args = p.parse_args(argv)
     args.fn(args)

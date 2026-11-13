@@ -10,6 +10,7 @@ import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 
+from .deepdive import read_deepdive
 from .explain import SituationIndex, describe_decision
 from .store import list_episodes, list_runs, read_internals, read_run_meta, read_steps
 
@@ -41,13 +42,23 @@ def runs_payload(root: Path) -> list[dict]:
     return out
 
 
+def _with_safety(d: Path) -> list[dict]:
+    eps = list_episodes(d)
+    for e in eps:
+        s = _read_json(d / "episodes" / e["episode_id"] / "safety.json")
+        e["safety"] = s["summary"] if s else None
+        e["deepdives"] = sorted(int(t) for t in (read_deepdive(d / "episodes" / e["episode_id"]) or {}))
+    return eps
+
+
 def run_payload(d: Path) -> dict:
     return {
         "run": read_run_meta(d),
         "report": _read_json(d / "report.json"),
         "gated_report": _read_json(d / "gated_report.json"),
-        "episodes": list_episodes(d),
+        "episodes": _with_safety(d),
         "map": situation_index(d).points(),
+        "scene": _read_json(d / "scene.json"),
     }
 
 
@@ -99,6 +110,8 @@ def episode_payload(d: Path, index: SituationIndex | None = None) -> dict:
     df = read_steps(d.parent.parent, d.name)
     return {
         "decisions": decisions_payload(d, index),
+        "safety": _read_json(d / "safety.json"),
+        "deepdive": read_deepdive(d, compact=True),
         "meta": _read_json(d / "meta.json"),
         "steps": {
             "risk": _clean(df["risk"].tolist()),

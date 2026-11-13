@@ -27,6 +27,7 @@ from pathlib import Path
 import numpy as np
 
 from ..explain import commit_step, plan_modes
+from ..safety import Scene, assess, choose_plan, path_clearance
 from ..gate import Gate
 from ..metrics import TraceConfig
 from ..predictor import Predictor
@@ -45,6 +46,7 @@ GATE_CONFIG = {
 EXTRA_FEATURES = ["plan_shift", "n_modes", "top_mode_share", "commit_step", "final_spread"]
 # Sampled plans closer than this (mean point distance, pixels of a 512 px workspace) count as one option.
 MODE_THRESHOLD_PX = 30.0
+BLOCK_RADIUS = 45.0  # rough half-extent of the T block, for hazard clearance
 
 
 class DiffusionPushTPolicy:
@@ -94,8 +96,51 @@ class DiffusionPushTPolicy:
     def observe(self, obs: dict) -> None:
         self.history.append(obs)
 
+    def infer(self, pixels: np.ndarray, agent_pos: np.ndarray, noise=None, repeat: int = 1, keep_stages: bool = False) -> dict:
+        """One batched forward pass of the whole policy.
+
+        pixels (B, n_obs, H, W, 3) uint8, agent_pos (B, n_obs, 2). `repeat` draws
+        that many plans per observation. `noise` (B*repeat, horizon, 2) fixes the
+        starting noise, so two calls differ only by their inputs.
+        Returns plans (B*repeat, horizon, 2) in pixels, the conditioning vectors,
+        the spread between samples after each denoising step and, with
+        keep_stages, `stages` (n_denoise, B*repeat, horizon, 2): the plan the
+        model would output if it stopped after each denoising step.
+        """
+        torch = self.torch
+        img = torch.from_numpy(np.ascontiguousarray(pixels)).permute(0, 1, 4, 2, 3).float() / 255
+        img = (img - self.img_mean) / self.img_std
+        state = torch.from_numpy(np.asarray(agent_pos, dtype=np.float32))
+        state = (state - self.s_min) / (self.s_max - self.s_min) * 2 - 1
+        unnorm = lambda a: (a + 1) / 2 * (self.a_max - self.a_min) + self.a_min
+        with torch.no_grad():
+            diffusion = self.policy.diffusion
+            cond = diffusion._prepare_global_conditioning({"observation.state": state, "observation.images": img[:, :, None]})
+            gc = cond.repeat_interleave(repeat, dim=0)
+            n = len(gc)
+            sample = torch.randn(n, diffusion.config.horizon, 2) if noise is None else torch.as_tensor(noise, dtype=torch.float32)
+            # Same loop as DiffusionModel.conditional_sample, but keeping the intermediate steps.
+            diffusion.noise_scheduler.set_timesteps(diffusion.num_inference_steps)
+            spread, path, stages = [], [], []
+            for t in diffusion.noise_scheduler.timesteps:
+                out = diffusion.unet(sample, torch.full((n,), int(t), dtype=torch.long), global_cond=gc)
+                step = diffusion.noise_scheduler.step(out, t, sample)
+                sample = step.prev_sample
+                px = unnorm(sample)
+                spread.append(float(px.std(dim=0).mean()))
+                path.append(px[0].numpy().copy())
+                if keep_stages:
+                    stages.append(unnorm(step.pred_original_sample.clamp(-1, 1)).numpy().copy())
+        return {
+            "plans": unnorm(sample).numpy(),
+            "cond": cond.numpy(),
+            "spread": np.array(spread, np.float32),
+            "path": np.stack(path).astype(np.float32),
+            "stages": np.stack(stages) if keep_stages else None,
+        }
+
     def decide(self) -> dict:
-        """Run the model once. Returns:
+        """Run the model once on the current observation history. Returns:
 
         chunks        (N, n_exec, 2) target positions for the next steps; chunks[0] is executed
         plan_shift    how far the new plan moved from what the previous plan predicted (px)
@@ -107,29 +152,12 @@ class DiffusionPushTPolicy:
             denoise_spread  (n_denoise,) disagreement between samples after each denoising step (px)
             denoise_path    (n_denoise, horizon, 2) the executed plan forming out of noise
         """
-        torch = self.torch
-        img = torch.stack([torch.from_numpy(o["pixels"]).permute(2, 0, 1).float() / 255 for o in self.history])
-        img = (img - self.img_mean) / self.img_std
-        state = torch.stack([torch.from_numpy(o["agent_pos"]).float() for o in self.history])
-        state = (state - self.s_min) / (self.s_max - self.s_min) * 2 - 1
-        batch = {"observation.state": state[None], "observation.images": img[None, :, None]}
-        unnorm = lambda a: (a + 1) / 2 * (self.a_max - self.a_min) + self.a_min
-        with torch.no_grad():
-            diffusion = self.policy.diffusion
-            cond = diffusion._prepare_global_conditioning(batch)  # image encoder runs once
-            # Same loop as DiffusionModel.conditional_sample, but keeping the intermediate steps.
-            n = self.n_samples
-            sample = torch.randn(n, diffusion.config.horizon, 2)
-            diffusion.noise_scheduler.set_timesteps(diffusion.num_inference_steps)
-            gc = cond.expand(n, -1)
-            spread, path = [], []
-            for t in diffusion.noise_scheduler.timesteps:
-                out = diffusion.unet(sample, torch.full((n,), int(t), dtype=torch.long), global_cond=gc)
-                sample = diffusion.noise_scheduler.step(out, t, sample).prev_sample
-                px = unnorm(sample)
-                spread.append(float(px.std(dim=0).mean()))
-                path.append(px[0].numpy().copy())
-        horizon = unnorm(sample).numpy()
+        r = self.infer(
+            np.stack([o["pixels"] for o in self.history])[None],
+            np.stack([o["agent_pos"] for o in self.history])[None],
+            repeat=self.n_samples,
+        )
+        horizon = r["plans"]
         start = self.n_obs - 1
         chunks = horizon[:, start : start + self.n_exec]
         overlap = horizon.shape[1] - (start + self.n_exec)
@@ -137,22 +165,88 @@ class DiffusionPushTPolicy:
         if self.prev_tail is not None and overlap > 0:
             shift = float(np.linalg.norm(horizon[0, start : start + overlap] - self.prev_tail, axis=1).mean())
         self.prev_tail = horizon[0, start + self.n_exec :].copy()
-        # Keypoints come out in [-1, 1] over the centre crop the encoder sees.
-        crop = self.policy.config.crop_shape or (96, 96)
-        size = self.history[-1]["pixels"].shape[0]
-        kp = (self._keypoints[-1] + 1) / 2 * np.array([crop[1], crop[0]]) + (size - np.array([crop[1], crop[0]])) / 2
         internals = {
             "plans": horizon.astype(np.float32),
             "modes": plan_modes(chunks, MODE_THRESHOLD_PX),
-            "keypoints": kp.astype(np.float32),
-            "embedding": cond[0].numpy().astype(np.float32),
-            "denoise_spread": np.array(spread, np.float32),
-            "denoise_path": np.stack(path).astype(np.float32),
+            "keypoints": self.keypoints_px().astype(np.float32),
+            "embedding": r["cond"][0].astype(np.float32),
+            "denoise_spread": r["spread"],
+            "denoise_path": r["path"],
         }
         return {"chunks": chunks, "plan_shift": shift, "internals": internals}
 
+    def keypoints_px(self) -> np.ndarray:
+        """Attention points of the most recent frame, in image pixels."""
+        # They come out in [-1, 1] over the centre crop the encoder sees.
+        crop = self.policy.config.crop_shape or (96, 96)
+        box = np.array([crop[1], crop[0]])
+        return (self._keypoints[-1] + 1) / 2 * box + (96 - box) / 2
 
-def rollout(env, policy: DiffusionPushTPolicy, tracer: Tracer, seed: int) -> dict:
+    def use_plan(self, chunks: np.ndarray, internals: dict, index: int) -> None:
+        """Make sampled plan `index` the executed one (moves it to position 0 in place)."""
+        if index == 0:
+            return
+        order = [index] + [i for i in range(len(chunks)) if i != index]
+        chunks[:] = chunks[order]
+        internals["plans"] = internals["plans"][order]
+        internals["modes"] = plan_modes(chunks, MODE_THRESHOLD_PX)
+        start = self.n_obs - 1
+        self.prev_tail = internals["plans"][0, start + self.n_exec :].copy()
+
+
+def simulate_plans(sim_env, snapshot: np.ndarray, chunks: np.ndarray, scene: Scene | None = None) -> list[dict]:
+    """Predicted future of each sampled plan: run it in a copy of the simulator.
+
+    sim_env is a second gym-pusht environment used as the world model (on a real
+    robot this would be a learned or physics model). Returns one dict per plan:
+    reward before/after, `gain`, the pusher and block paths, and how close each
+    came to the scene's hazards.
+    """
+    futures = []
+    for chunk in chunks:
+        _, info = restore_pusht(sim_env, snapshot)
+        u = sim_env.unwrapped
+        start_reward = None
+        agent_path, block_path, reward = [info["pos_agent"].copy()], [info["block_pose"][:2].copy()], 0.0
+        for a in chunk:
+            _, reward, terminated, _, info = sim_env.step(np.asarray(a, dtype=np.float32))
+            if start_reward is None:
+                start_reward = float(reward)
+            agent_path.append(info["pos_agent"].copy())
+            block_path.append(info["block_pose"][:2].copy())
+            if terminated:
+                break
+        f = {
+            "reward_after": float(reward),
+            "gain": float(reward) - float(start_reward or 0.0),
+            "success": bool(info.get("is_success", False)),
+            "agent_path": np.array(agent_path),
+            "block_path": np.array(block_path),
+            "contact": False,
+            "risk": 0.0,
+            "clearance": None,
+            "hazard": None,
+        }
+        if scene and scene.hazards:
+            speed = float(np.linalg.norm(np.diff(f["agent_path"], axis=0), axis=1).max())
+            pusher = assess(f["agent_path"][0], f["agent_path"][None, 1:], speed, scene)
+            # The block is pushed, so it can be shoved into a hazard even if the pusher stays clear.
+            block = min((path_clearance(f["block_path"], h, BLOCK_RADIUS) + (h.name,) for h in scene.hazards), key=lambda r: r[0])
+            f["clearance"] = float(min(pusher["clearance"], block[0]))
+            f["contact"] = pusher["time_to_contact"] is not None or block[1] is not None
+            f["risk"] = float(max(pusher["risk"], 1.0 if block[1] is not None else 0.0))
+            f["hazard"] = block[2] if block[0] < pusher["clearance"] else pusher["hazard"]
+        futures.append(f)
+    return futures
+
+
+def rollout(env, policy: DiffusionPushTPolicy, tracer: Tracer, seed: int, sim_env=None, scene: Scene | None = None, shield: bool = False) -> dict:
+    """One traced episode.
+
+    With sim_env, the future of every sampled plan is predicted at each decision
+    and stored. With shield=True the plan with the best predicted future is the
+    one executed (see safety.choose_plan), instead of the first sample.
+    """
     obs, info = env.reset(seed=seed)
     policy.reset(seed, obs)
     success, reason, best = False, "timeout", 0.0
@@ -162,6 +256,18 @@ def rollout(env, policy: DiffusionPushTPolicy, tracer: Tracer, seed: int) -> dic
         while not done:
             d = policy.decide()
             chunks, z = d["chunks"], d["internals"]
+            snapshot = np.concatenate([info["pos_agent"], info["block_pose"]])
+            extra = {}
+            if sim_env is not None:
+                futures = simulate_plans(sim_env, snapshot, chunks, scene)
+                pick = choose_plan(futures) if shield else 0
+                extra = {"shield_switched": float(pick != 0), "predicted_gain": futures[pick]["gain"], "plans_in_contact": float(sum(f["contact"] for f in futures))}
+                if pick:
+                    policy.use_plan(chunks, z, pick)
+                    futures = [futures[pick]] + [f for i, f in enumerate(futures) if i != pick]
+                z = {**z, "future_gain": np.array([f["gain"] for f in futures], np.float32),
+                     "future_contact": np.array([f["contact"] for f in futures]),
+                     "future_block": np.stack([_pad(f["block_path"], chunks.shape[1] + 1) for f in futures]).astype(np.float32)}
             sizes = np.bincount(z["modes"])
             signals = {
                 "plan_shift": d["plan_shift"],
@@ -169,6 +275,7 @@ def rollout(env, policy: DiffusionPushTPolicy, tracer: Tracer, seed: int) -> dic
                 "top_mode_share": float(sizes[0] / sizes.sum()),
                 "commit_step": float(commit_step(z["denoise_spread"])),
                 "final_spread": float(z["denoise_spread"][-1]),
+                **extra,
             }
             for k in range(chunks.shape[1]):
                 pos = obs["agent_pos"].astype(float)
@@ -210,6 +317,9 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--samples", type=int, default=8)
     ap.add_argument("--ddim-steps", type=int, default=10)
     ap.add_argument("--model", help="stepscope predictor to score risk live")
+    ap.add_argument("--scene", help="YAML scene file with hazards")
+    ap.add_argument("--futures", action="store_true", help="predict and store the future of every sampled plan")
+    ap.add_argument("--shield", action="store_true", help="execute the sampled plan with the best predicted future")
     args = ap.parse_args(argv)
 
     policy = DiffusionPushTPolicy(n_samples=args.samples, ddim_steps=args.ddim_steps)
@@ -223,20 +333,25 @@ def main(argv: list[str] | None = None) -> None:
             "label": f"LeRobot diffusion policy on PushT ({REPO}), DDIM {args.ddim_steps} steps, {args.samples} samples",
             # Tells the viewer how to draw plans (workspace units) over the camera frame.
             "overlay": {"plan_extent": 512},
+            "shield": bool(args.shield),
         },
     )
     done = sum(1 for _ in (Path(args.run) / "episodes").iterdir())  # resume where a previous call stopped
     wins = 0
+    scene = Scene.from_file(args.scene) if args.scene else None
+    sim_env = gym.make("gym_pusht/PushT-v0", obs_type="state", max_episode_steps=10_000) if (args.futures or args.shield) else None
     for i in range(done, args.episodes):
         t0 = time.time()
-        s = rollout(env, policy, tracer, args.seed + i)
+        s = rollout(env, policy, tracer, args.seed + i, sim_env=sim_env, scene=scene, shield=args.shield)
         wins += bool(s["success"])
         print(f"episode {i + 1}/{args.episodes} seed {args.seed + i}: {s['reason']} in {s['n_steps']} steps, "
               f"best coverage {s['meta']['sim']['best_coverage']:.2f}, {time.time() - t0:.0f}s", flush=True)
 
 
-if __name__ == "__main__":
-    main()
+
+
+def _pad(path: np.ndarray, n: int) -> np.ndarray:
+    return np.concatenate([path, np.repeat(path[-1:], n - len(path), axis=0)]) if len(path) < n else path[:n]
 
 
 def restore_pusht(env, state, seed=None):
@@ -259,3 +374,7 @@ def restore_pusht(env, state, seed=None):
     info = u._get_info()
     info["is_success"] = False
     return u.get_obs(), info
+
+
+if __name__ == "__main__":
+    main()
