@@ -1,0 +1,9 @@
+# Load with: Gate.from_file("examples/gate.yaml")
+position_dims: [0, 1, 2]   # state dims that hold the end-effector position
+delta_dims: [0, 1, 2]      # action dims that are position deltas
+constraints:
+  - {type: max_step, name: speed_limit, max_norm: 0.05}
+  - {type: workspace_box, name: workspace, low: [0, 0, 0], high: [1, 1, 0.3]}
+  - {type: keep_out_box, name: operator_zone, low: [0, 0.7, 0], high: [0.24, 1, 0.3]}
+  # Needs a predictor on the tracer. Halts the episode when risk stays high.
+  - {type: risk_limit, name: failure_risk, max_risk: 0.9, sustain: 3}
