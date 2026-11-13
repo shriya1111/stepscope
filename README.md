@@ -35,7 +35,8 @@ stepscope demo
 stepscope serve --runs runs
 ```
 
-`stepscope demo` takes under a minute. It collects 400 training episodes, trains
+`stepscope export --runs runs --out stepscope.html` writes the viewer and its data as
+one self-contained page. `stepscope demo` takes under a minute. It collects 400 training episodes, trains
 the predictor, scores 200 held-out episodes live, then re-runs those same
 episodes with the gate halting on high risk. The viewer opens on
 http://127.0.0.1:8321.
@@ -107,6 +108,63 @@ runs/<run>/episodes/<id>/steps.parquet  one row per step: state, action, execute
                                         action, gate verdict, belief, risk, m_* metrics
 runs/<run>/episodes/<id>/frames.png     camera frames as one sprite sheet
 ```
+
+## Seeing inside the model
+
+Pass arrays from inside your model to `ep.step(internals={...})` on the steps
+where it runs. They are saved per episode in `internals.npz` and the viewer
+turns them into:
+
+- **Sampled plans drawn on the camera frame**, grouped into options ("4 of 6
+  plans go left, 2 go right"), with the executed plan highlighted.
+- **Attention points**: where the vision encoder's last layer is looking.
+- **Plans forming out of noise**: disagreement between samples after each
+  denoising step.
+- **A situation map**: every decision placed by the model's internal
+  representation, coloured by how the episode ended, and for each decision the
+  most similar past moments and their outcomes.
+- **A one-line summary** of each decision.
+
+The LeRobot PushT harness (`src/stepscope/adapters/lerobot_pusht.py`) records all
+of these from a real pretrained diffusion policy:
+
+```bash
+pip install "lerobot[diffusion,pusht]"
+```
+
+```bash
+python -m stepscope.adapters.lerobot_pusht --run runs/pusht --episodes 40
+```
+
+## Training data from traces
+
+```bash
+stepscope export-dataset --run runs/pusht --out dataset.parquet
+```
+
+```bash
+stepscope situations --run runs/pusht --out situations.json
+```
+
+- `export-dataset` writes every step as a transition (state, action, executed
+  action, reward, next state, done) with the risk score, a label and a sampling
+  weight. Labels: `normal`, `pre_alert` (the run-up to an alert in a failed
+  episode, weight 3), `post_alert_failed` (do not imitate, weight 0),
+  `recovery` (weight 2), `failed_no_alert`.
+- `situations` saves the environment state a few steps before each alert (or
+  risk peak) as a library of restart points.
+- `ResetToSituation` is a Gymnasium wrapper that starts each episode from one of
+  them, so a learner practises the hard moments:
+
+```python
+from stepscope.rl import load_situations, reset_to_situation_wrapper
+from stepscope.adapters.lerobot_pusht import restore_pusht
+
+env = reset_to_situation_wrapper()(env, load_situations("situations.json"), apply=restore_pusht)
+```
+
+Log `reward=` and `snapshot=` in `ep.step()` to enable these. No RL training
+loop is included; this is the data and the restart mechanism.
 
 ## Tests
 

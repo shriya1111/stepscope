@@ -237,3 +237,25 @@ def main(argv: list[str] | None = None) -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def restore_pusht(env, state, seed=None):
+    """Put a gym-pusht environment into a saved snapshot [agent x, y, block x, y, angle].
+
+    Use as ResetToSituation(env, situations, apply=restore_pusht). gym-pusht's own
+    reset_to_state sets the block position before its angle, which shifts the
+    block; setting the angle first restores the snapshot exactly.
+    """
+    env.reset(seed=seed)
+    u = env.unwrapped
+    u.agent.position = [float(state[0]), float(state[1])]
+    u.agent.velocity = (0, 0)
+    u.block.angle = float(state[4])
+    u.block.position = [float(state[2]), float(state[3])]
+    u.block.velocity = (0, 0)
+    u.block.angular_velocity = 0
+    u.space.reindex_shapes_for_body(u.block)
+    u.space.reindex_shapes_for_body(u.agent)
+    info = u._get_info()
+    info["is_success"] = False
+    return u.get_obs(), info
