@@ -163,6 +163,7 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--scene")
     ap.add_argument("--samples", type=int, default=6)
     ap.add_argument("--ddim-steps", type=int, default=8)
+    ap.add_argument("--force", action="store_true", help="redo episodes that already have a deep dive")
     args = ap.parse_args(argv)
 
     run = Path(args.run)
@@ -176,6 +177,9 @@ def main(argv: list[str] | None = None) -> None:
     env = gym.make("gym_pusht/PushT-v0", obs_type="pixels_agent_pos", max_episode_steps=10_000)
     sim_env = gym.make("gym_pusht/PushT-v0", obs_type="state", max_episode_steps=10_000)
     for ep in chosen:
+        if (run / "episodes" / ep / "deepdive.json").exists() and not args.force:
+            print(f"{ep}: already analysed, skipping", flush=True)
+            continue
         z = read_internals(run, ep)
         steps = z["plans__t"][:: args.every].tolist()
         t0 = time.time()
