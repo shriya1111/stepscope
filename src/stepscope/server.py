@@ -10,7 +10,6 @@ import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 
-from .metrics import METRIC_NAMES
 from .store import list_episodes, list_runs, read_run_meta, read_steps
 
 _NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -86,7 +85,7 @@ def create_app(runs_root: str | Path) -> FastAPI:
                 "state": [list(map(float, s)) for s in df["state"]],
                 "action": [list(map(float, s)) for s in df["action"]],
                 "executed": [list(map(float, s)) for s in df["executed"]],
-                "metrics": {n: _clean(df[f"m_{n}"].tolist()) for n in METRIC_NAMES if f"m_{n}" in df},
+                "metrics": {c[2:]: _clean(df[c].tolist()) for c in df.columns if c.startswith("m_")},
             },
         }
 

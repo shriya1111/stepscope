@@ -22,7 +22,7 @@ from typing import Any
 import numpy as np
 
 from .gate import Decision, Gate
-from .metrics import METRIC_NAMES, OnlineMetrics, TraceConfig
+from .metrics import OnlineMetrics, TraceConfig
 from .predictor import Predictor, first_alert
 from .store import dump_json, write_episode
 
@@ -89,6 +89,7 @@ class EpisodeTrace:
         frame: np.ndarray | None = None,
         belief: dict | None = None,
         plan_step: int | None = None,
+        signals: dict[str, float] | None = None,
     ) -> Decision:
         """Record one step and return the gate's decision. Execute `decision.action`.
 
@@ -100,6 +101,8 @@ class EpisodeTrace:
         belief: optional dict of whatever the policy believes (subtask, detected
             object pose, plan text). Stored as-is and shown in the viewer.
         plan_step: optional index of the current plan step / subtask.
+        signals: optional extra per-step numbers of your own (for example a
+            model's token entropy). Stored as metrics and usable as predictor features.
         """
         tr = self.tracer
         state = np.asarray(state, dtype=float).ravel()
@@ -107,6 +110,8 @@ class EpisodeTrace:
         samples = None if action_samples is None else np.asarray(action_samples, dtype=float)
 
         m = self._metrics.update(state, action, samples, plan_step)
+        for k, v in (signals or {}).items():
+            m[k] = float(v)
         risk = tr.predictor.score_step(m, state) if tr.predictor else float("nan")
         if tr.gate:
             decision = tr.gate.check(state, action, risk)
@@ -125,8 +130,8 @@ class EpisodeTrace:
             "plan_step": -1 if plan_step is None else int(plan_step),
             "risk": risk,
         }
-        for name in METRIC_NAMES:
-            row[f"m_{name}"] = m[name]
+        for name, value in m.items():
+            row[f"m_{name}"] = value
         self._rows.append(row)
         if frame is not None:
             self._frames.append(np.asarray(frame, dtype=np.uint8))
@@ -159,7 +164,8 @@ class EpisodeTrace:
             alert = first_alert(risk, tr.predictor.threshold, tr.predictor.sustain)
             summary["first_alert_step"] = alert
             if alert is not None:
-                metrics = {n: np.array([r[f"m_{n}"] for r in self._rows], float) for n in METRIC_NAMES}
+                names = [k[2:] for k in self._rows[0] if k.startswith("m_")]
+                metrics = {n: np.array([r.get(f"m_{n}", np.nan) for r in self._rows], float) for n in names}
                 states = np.array([r["state"] for r in self._rows], float)
                 summary["causes"] = tr.predictor.explain(metrics, states, alert)
         write_episode(tr.run_dir / "episodes" / self.episode_id, self._rows, self._frames, summary)

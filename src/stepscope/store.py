@@ -20,7 +20,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from .metrics import METRIC_NAMES
 
 SPRITE_COLUMNS = 16
 
@@ -111,7 +110,7 @@ def read_steps(run_dir: Path, episode_id: str) -> pd.DataFrame:
 
 
 def metrics_matrix(df: pd.DataFrame) -> dict[str, np.ndarray]:
-    return {name: df[f"m_{name}"].to_numpy(dtype=float) for name in METRIC_NAMES if f"m_{name}" in df}
+    return {c[2:]: df[c].to_numpy(dtype=float) for c in df.columns if c.startswith("m_")}
 
 
 def states_matrix(df: pd.DataFrame) -> np.ndarray:

@@ -95,7 +95,7 @@ def cmd_collect(args: argparse.Namespace) -> None:
 def cmd_train(args: argparse.Namespace) -> None:
     from .evaluate import train
 
-    model, baseline = train(args.run, false_alarm_rate=args.false_alarm_rate)
+    model, baseline = train(args.run, false_alarm_rate=args.false_alarm_rate, extra_features=args.extra_features)
     model.save(args.out)
     baseline.save(Path(args.out).with_name("baseline_time_only.json"))
     print(f"Saved {args.out} (alert threshold {model.threshold:.2f}, sustained {model.sustain} steps)")
@@ -141,6 +141,7 @@ def main(argv: list[str] | None = None) -> None:
     t.add_argument("--run", required=True)
     t.add_argument("--out", default="models/predictor.json")
     t.add_argument("--false-alarm-rate", type=float, default=0.05)
+    t.add_argument("--extra-features", nargs="*", default=[], help="names of your own signals to use as features")
     t.set_defaults(fn=cmd_train)
 
     e = sub.add_parser("evaluate", help="score a held-out run")

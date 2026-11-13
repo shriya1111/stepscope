@@ -28,12 +28,19 @@ def load_episodes(run_dir: str | Path) -> list[dict]:
     return out
 
 
-def train(run_dir: str | Path, false_alarm_rate: float = 0.05) -> tuple[Predictor, Predictor]:
-    """Returns (predictor, time-only baseline) fitted on a traced run."""
+def train(
+    run_dir: str | Path, false_alarm_rate: float = 0.05, extra_features: list[str] | None = None
+) -> tuple[Predictor, Predictor]:
+    """Returns (predictor, time-only baseline) fitted on a traced run.
+
+    extra_features: names of your own `signals` to use alongside the built-in metrics.
+    """
+    from .predictor import DEFAULT_FEATURES
+
     eps = load_episodes(run_dir)
     if not any(e["success"] for e in eps) or all(e["success"] for e in eps):
         raise ValueError("training needs both successful and failed episodes")
-    model = Predictor().fit(eps, false_alarm_rate=false_alarm_rate)
+    model = Predictor(DEFAULT_FEATURES + list(extra_features or [])).fit(eps, false_alarm_rate=false_alarm_rate)
     baseline = Predictor(features=["elapsed"]).fit(eps, false_alarm_rate=false_alarm_rate)
     return model, baseline
 

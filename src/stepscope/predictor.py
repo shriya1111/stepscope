@@ -35,6 +35,7 @@ SYMPTOMS = [
     ("retry loop", "behaviour", [("plan_regressions", 1)]),
     ("stuck on a subgoal", "behaviour", [("subgoal_dwell", 1)]),
     ("fighting the gate", "behaviour", [("gate_interventions", 1)]),
+    ("plan keeps changing", "behaviour", [("plan_shift", 1)]),
     ("policy uncertainty", "factor", [("sample_spread_ema", 1)]),
     ("indecision between actions", "factor", [("direction_disagreement_ema", 1)]),
     ("unfamiliar state", "factor", [("novelty", 1)]),
