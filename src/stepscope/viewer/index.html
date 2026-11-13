@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>stepscope</title>
+<meta name="claude:viewport-fit-sides" content="cover">
 <style>
 :root {
   color-scheme: light;
@@ -14,7 +15,7 @@
   --wash: rgba(42,120,214,.10); --hover: rgba(11,11,11,.045);
 }
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     color-scheme: dark;
     --page: #121211; --surface: #1a1a19; --raised: #222221; --line: #33332f; --grid: #2a2a27;
     --text: #f0efec; --text-2: #c3c2b7; --text-3: #8d8c84;
@@ -22,9 +23,16 @@
     --wash: rgba(57,135,229,.16); --hover: rgba(240,239,236,.06);
   }
 }
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #121211; --surface: #1a1a19; --raised: #222221; --line: #33332f; --grid: #2a2a27;
+    --text: #f0efec; --text-2: #c3c2b7; --text-3: #8d8c84;
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300; --s7: #9085e9;
+    --wash: rgba(57,135,229,.16); --hover: rgba(240,239,236,.06);
+}
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--page); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
-header { display: flex; align-items: center; gap: 16px; padding: 12px 24px; background: var(--surface); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+header { display: flex; align-items: center; gap: 16px; padding-block: 12px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); background: var(--surface); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
 header .brand { font-weight: 650; letter-spacing: -.01em; font-size: 16px; }
 header .brand span { color: var(--text-3); font-weight: 400; margin-left: 8px; font-size: 13px; }
 select, button { font: inherit; color: var(--text); background: var(--raised); border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; }
@@ -32,7 +40,9 @@ button { cursor: pointer; }
 button:hover { background: var(--hover); }
 button:disabled { opacity: .45; cursor: default; }
 button.on { background: var(--text); color: var(--surface); border-color: var(--text); }
-main { max-width: 1180px; margin: 0 auto; padding: 20px 24px 60px; }
+main { max-width: 1180px; margin: 0 auto; padding-block: 20px 60px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+.card { min-width: 0; }
+dd { min-width: 0; overflow-wrap: anywhere; }
 h1 { font-size: 20px; margin: 0 0 2px; letter-spacing: -.01em; }
 h2 { font-size: 13px; font-weight: 600; margin: 0 0 10px; color: var(--text-2); }
 .sub { color: var(--text-2); margin: 0 0 18px; }
@@ -64,10 +74,10 @@ tbody tr:hover, tbody tr:focus { background: var(--hover); outline: none; }
 .back:hover { color: var(--text); }
 .ep-top { display: grid; grid-template-columns: 320px 1fr; gap: 14px; margin-bottom: 14px; }
 @media (max-width: 800px) { .ep-top { grid-template-columns: 1fr; } }
-canvas#cam { width: 288px; height: 288px; image-rendering: pixelated; border-radius: 6px; display: block; background: var(--grid); }
+canvas#cam { width: 288px; max-width: 100%; aspect-ratio: 1; height: auto; image-rendering: pixelated; border-radius: 6px; display: block; background: var(--grid); }
 .controls { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; align-items: center; }
 .stepno { margin-left: auto; color: var(--text-2); font-variant-numeric: tabular-nums; }
-dl { display: grid; grid-template-columns: 150px 1fr; gap: 5px 12px; margin: 0; }
+dl { display: grid; grid-template-columns: minmax(96px, 150px) 1fr; gap: 5px 12px; margin: 0; }
 dt { color: var(--text-2); } dd { margin: 0; font-variant-numeric: tabular-nums; }
 .chips { display: flex; gap: 6px; flex-wrap: wrap; }
 .chip { border: 1px solid var(--line); border-radius: 999px; padding: 1px 9px; font-size: 12px; background: var(--raised); }
@@ -113,7 +123,12 @@ function svg(tag, attrs = {}, text) {
   if (text !== undefined) e.textContent = text;
   return e;
 }
-const api = (p) => fetch("/api/" + p).then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); });
+/*STEPSCOPE_DATA*/
+const STATIC = window.STEPSCOPE_DATA || null;  // set by "stepscope export": the page then needs no server
+const api = (p) => STATIC ? (p in STATIC.api ? Promise.resolve(STATIC.api[p]) : Promise.reject(new Error("not in export")))
+  : fetch("/api/" + p).then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); });
+let ROUTE = "";
+const nav = (h) => { if (STATIC) { ROUTE = h; route(); scrollTo(0, 0); } else location.hash = h; };
 const median = (a) => { if (!a.length) return null; const s = [...a].sort((x, y) => x - y), m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
 const pct = (x) => (x === null || isNaN(x)) ? "n/a" : Math.round(100 * x) + "%";
 const fmt = (v, d = 2) => (v === null || v === undefined || isNaN(v)) ? "–" : Number(v).toFixed(d);
@@ -142,7 +157,7 @@ async function boot() {
   try { RUNS = await api("runs"); } catch { RUNS = []; }
   const sel = $("runsel");
   sel.replaceChildren(...RUNS.map((r) => el("option", { value: r.name }, r.name + " (" + r.episodes + ")")));
-  sel.onchange = () => { location.hash = "#/run/" + sel.value; };
+  sel.onchange = () => nav("#/run/" + sel.value);
   window.onhashchange = route;
   route();
 }
@@ -150,7 +165,7 @@ function route() {
   clearInterval(playTimer); hideTip(); document.onkeydown = null; window.onresize = null;
   const app = $("app");
   if (!RUNS.length) { app.replaceChildren(el("div", { class: "empty" }, "No runs found. Create some with: stepscope demo")); return; }
-  const m = location.hash.match(/^#\/run\/([^/]+)(?:\/ep\/([^/]+))?/);
+  const m = (STATIC ? ROUTE : location.hash).match(/^#\/run\/([^/]+)(?:\/ep\/([^/]+))?/);
   const pick = RUNS.find((r) => r.name === "eval") || RUNS[0];
   const run = m && RUNS.some((r) => r.name === m[1]) ? m[1] : pick.name;
   $("runsel").value = run;
@@ -218,7 +233,7 @@ async function fleetView(run) {
     const rows = eps.filter(pass);
     count.textContent = rows.length + " episodes";
     tbody.replaceChildren(...rows.map((e) => {
-      const go = () => { location.hash = "#/run/" + run + "/ep/" + e.episode_id; };
+      const go = () => nav("#/run/" + run + "/ep/" + e.episode_id);
       const risk = e.max_risk === null ? el("td", { class: "num" }, "–") :
         el("td", { class: "num" }, el("span", { class: "meter" }, el("b", { style: "width:" + Math.round(100 * e.max_risk) + "%" })), fmt(e.max_risk));
       return el("tr", { tabindex: 0, onclick: go, onkeydown: (ev) => { if (ev.key === "Enter") go(); } },
@@ -267,7 +282,7 @@ async function episodeView(run, epId) {
   const app = $("app");
   let data;
   try { data = await api(`runs/${encodeURIComponent(run)}/episodes/${encodeURIComponent(epId)}`); }
-  catch { app.replaceChildren(el("div", { class: "empty" }, "Episode not found.")); return; }
+  catch { app.replaceChildren(el("div", { class: "empty" }, STATIC ? "This episode's step data was left out of the export to keep the page small." : "Episode not found.")); return; }
   const runInfo = await api("runs/" + encodeURIComponent(run));
   const { meta, steps } = data, n = meta.n_steps, alertCfg = runInfo.run.alert;
   const ids = runInfo.episodes.map((e) => e.episode_id), at = ids.indexOf(epId);
@@ -277,7 +292,7 @@ async function episodeView(run, epId) {
   // --- camera ---
   const cam = el("canvas", { id: "cam", width: 288, height: 288 });
   const img = new Image();
-  if (meta.frames) { img.onload = () => setStep(cur); img.src = `/api/runs/${encodeURIComponent(run)}/episodes/${encodeURIComponent(epId)}/frames.png`; }
+  if (meta.frames) { img.onload = () => setStep(cur); img.src = STATIC ? (STATIC.frames[run + "/" + epId] || "") : `/api/runs/${encodeURIComponent(run)}/episodes/${encodeURIComponent(epId)}/frames.png`; }
   function drawFrame(t) {
     const f = meta.frames, ctx = cam.getContext("2d");
     if (!f || !img.complete || !img.naturalWidth) return;
@@ -322,7 +337,7 @@ async function episodeView(run, epId) {
   function build() {
     updaters.length = 0;
     chartsCard.querySelectorAll(".chart, .legend").forEach((c) => c.remove());
-    const W = Math.max(320, chartsCard.clientWidth - 32);
+    const W = Math.max(240, chartsCard.clientWidth - 34);
     const x = (t) => L + (W - L - R) * (n > 1 ? t / (n - 1) : 0);
     const stepAt = (ev, s) => Math.max(0, Math.min(n - 1, Math.round((ev.clientX - s.getBoundingClientRect().left - L) / (W - L - R) * (n - 1))));
     function finish(c, tipRows) {
@@ -427,10 +442,10 @@ async function episodeView(run, epId) {
   }
 
   const nav = el("div", { class: "row", style: "margin:0 0 12px" },
-    el("a", { class: "back", style: "margin:0", href: "#/run/" + run }, "← All episodes in " + run),
+    el("a", { class: "back", style: "margin:0", href: "#/run/" + run, onclick: (ev) => { ev.preventDefault(); nav("#/run/" + run); } }, "← All episodes in " + run),
     el("span", { style: "flex:1" }),
-    el("button", { onclick: () => { location.hash = `#/run/${run}/ep/${ids[at - 1]}`; }, ...(at <= 0 ? { disabled: "" } : {}) }, "Previous episode"),
-    el("button", { onclick: () => { location.hash = `#/run/${run}/ep/${ids[at + 1]}`; }, ...(at >= ids.length - 1 ? { disabled: "" } : {}) }, "Next episode"));
+    el("button", { onclick: () => nav(`#/run/${run}/ep/${ids[at - 1]}`), ...(at <= 0 ? { disabled: "" } : {}) }, "Previous episode"),
+    el("button", { onclick: () => nav(`#/run/${run}/ep/${ids[at + 1]}`), ...(at >= ids.length - 1 ? { disabled: "" } : {}) }, "Next episode"));
   app.replaceChildren(nav, el("h1", {}, epId), el("p", { class: "sub" }, meta.task || ""),
     el("div", { class: "ep-top" },
       el("div", { class: "card" }, cam, controls),

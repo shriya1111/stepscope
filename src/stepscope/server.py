@@ -21,6 +21,52 @@ def _clean(values) -> list:
     return [None if (isinstance(v, float) and not np.isfinite(v)) else v for v in values]
 
 
+def _read_json(path: Path):
+    return json.loads(path.read_text()) if path.exists() else None
+
+
+def runs_payload(root: Path) -> list[dict]:
+    out = []
+    for d in list_runs(root):
+        eps = list_episodes(d)
+        out.append(
+            {
+                "name": d.name,
+                "label": read_run_meta(d).get("label") or "",
+                "episodes": len(eps),
+                "successes": sum(bool(e["success"]) for e in eps),
+            }
+        )
+    return out
+
+
+def run_payload(d: Path) -> dict:
+    return {
+        "run": read_run_meta(d),
+        "report": _read_json(d / "report.json"),
+        "gated_report": _read_json(d / "gated_report.json"),
+        "episodes": list_episodes(d),
+    }
+
+
+def episode_payload(d: Path) -> dict:
+    df = read_steps(d.parent.parent, d.name)
+    return {
+        "meta": _read_json(d / "meta.json"),
+        "steps": {
+            "risk": _clean(df["risk"].tolist()),
+            "verdict": df["verdict"].tolist(),
+            "violations": [json.loads(v) for v in df["violations"]],
+            "belief": [json.loads(v) for v in df["belief"]],
+            "plan_step": df["plan_step"].tolist(),
+            "state": [list(map(float, s)) for s in df["state"]],
+            "action": [list(map(float, s)) for s in df["action"]],
+            "executed": [list(map(float, s)) for s in df["executed"]],
+            "metrics": {c[2:]: _clean(df[c].tolist()) for c in df.columns if c.startswith("m_")},
+        },
+    }
+
+
 def create_app(runs_root: str | Path) -> FastAPI:
     root = Path(runs_root)
     app = FastAPI(title="stepscope", docs_url=None, redoc_url=None)
@@ -41,53 +87,17 @@ def create_app(runs_root: str | Path) -> FastAPI:
             raise HTTPException(404, "no such episode")
         return d
 
-    def read_json(path: Path):
-        return json.loads(path.read_text()) if path.exists() else None
-
     @app.get("/api/runs")
     def runs():
-        out = []
-        for d in list_runs(root):
-            eps = list_episodes(d)
-            meta = read_run_meta(d)
-            out.append(
-                {
-                    "name": d.name,
-                    "label": meta.get("label") or "",
-                    "episodes": len(eps),
-                    "successes": sum(bool(e["success"]) for e in eps),
-                }
-            )
-        return out
+        return runs_payload(root)
 
     @app.get("/api/runs/{run}")
     def run_detail(run: str):
-        d = run_dir(run)
-        return {
-            "run": read_run_meta(d),
-            "report": read_json(d / "report.json"),
-            "gated_report": read_json(d / "gated_report.json"),
-            "episodes": list_episodes(d),
-        }
+        return run_payload(run_dir(run))
 
     @app.get("/api/runs/{run}/episodes/{ep}")
     def episode(run: str, ep: str):
-        d = episode_dir(run, ep)
-        df = read_steps(d.parent.parent, ep)
-        return {
-            "meta": read_json(d / "meta.json"),
-            "steps": {
-                "risk": _clean(df["risk"].tolist()),
-                "verdict": df["verdict"].tolist(),
-                "violations": [json.loads(v) for v in df["violations"]],
-                "belief": [json.loads(v) for v in df["belief"]],
-                "plan_step": df["plan_step"].tolist(),
-                "state": [list(map(float, s)) for s in df["state"]],
-                "action": [list(map(float, s)) for s in df["action"]],
-                "executed": [list(map(float, s)) for s in df["executed"]],
-                "metrics": {c[2:]: _clean(df[c].tolist()) for c in df.columns if c.startswith("m_")},
-            },
-        }
+        return episode_payload(episode_dir(run, ep))
 
     @app.get("/api/runs/{run}/episodes/{ep}/frames.png")
     def frames(run: str, ep: str):

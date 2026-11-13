@@ -1,4 +1,4 @@
-"""Command line: stepscope demo | collect | train | evaluate | serve."""
+"""Command line: stepscope demo | collect | train | evaluate | serve | export."""
 
 from __future__ import annotations
 
@@ -119,6 +119,13 @@ def cmd_serve(args: argparse.Namespace) -> None:
     uvicorn.run(create_app(args.runs), host=args.host, port=args.port, log_level="warning")
 
 
+def cmd_export(args: argparse.Namespace) -> None:
+    from .export import export_html
+
+    r = export_html(args.runs, args.out, runs=args.only or None, max_mb=args.max_mb)
+    print(f"Wrote {args.out} ({r['bytes'] / 1e6:.1f} MB): step data for {r['episodes_with_steps']} of {r['episodes_total']} episodes")
+
+
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="stepscope", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -155,6 +162,13 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8321)
     s.set_defaults(fn=cmd_serve)
+
+    x = sub.add_parser("export", help="write the viewer and its data as one HTML file")
+    x.add_argument("--runs", default="runs")
+    x.add_argument("--out", default="stepscope.html")
+    x.add_argument("--only", nargs="*", help="run names to include (default: all)")
+    x.add_argument("--max-mb", type=float, default=14.0)
+    x.set_defaults(fn=cmd_export)
 
     args = p.parse_args(argv)
     args.fn(args)
