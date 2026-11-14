@@ -51,20 +51,33 @@ class Gate:
           - {type: workspace_box, low: [0, 0, 0], high: [1, 1, 0.3]}
           - {type: keep_out_box, name: operator_zone, low: [...], high: [...]}
           - {type: risk_limit, max_risk: 0.9, sustain: 5}
+
+    For arms driven by joint targets (position_dims/delta_dims are then the joints):
+
+          - {type: max_joint_step, max_abs: 0.1}
+          - {type: joint_limits, low: [...], high: [...]}
+          - {type: cartesian_box, low: [x, y, z], high: [x, y, z]}          # needs fk
+          - {type: cartesian_keep_out_sphere, center: [x, y, z], radius: r}  # needs fk
     """
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, fk=None):
+        """fk: for the cartesian_* constraints, a function mapping the next
+        joint vector to the (P, 3) positions of the robot's tracked points
+        (see stepscope.kinematics.Kinematics.points)."""
         self.config = config
+        self.fk = fk
         self.position_dims = list(config.get("position_dims", []))
         self.delta_dims = list(config.get("delta_dims", self.position_dims))
         if len(self.position_dims) != len(self.delta_dims):
             raise ValueError("position_dims and delta_dims must have the same length")
         self.constraints = [dict(c) for c in config.get("constraints", [])]
-        known = {"max_step", "workspace_box", "keep_out_box", "risk_limit"}
+        known = {"max_step", "workspace_box", "keep_out_box", "risk_limit", "joint_limits", "max_joint_step", "cartesian_box", "cartesian_keep_out_sphere"}
         for c in self.constraints:
             if c.get("type") not in known:
                 raise ValueError(f"unknown constraint type: {c.get('type')!r}")
             c.setdefault("name", c["type"])
+            if c["type"].startswith("cartesian") and fk is None:
+                raise ValueError(f"constraint {c['name']!r} needs a kinematics function: Gate(config, fk=...)")
         self._risk_streak = 0
 
     @classmethod
@@ -134,6 +147,43 @@ class Gate:
                     if slid is not None:
                         delta = slid
                         escalate("clamp")
+                    else:
+                        delta = np.zeros_like(delta)
+                        escalate("block")
+
+            elif kind == "max_joint_step":
+                # No single joint may move more than this in one step; the whole move is scaled to keep its direction.
+                biggest = float(np.abs(delta).max()) if len(delta) else 0.0
+                if biggest > c["max_abs"] + 1e-12:
+                    violations.append({"constraint": c["name"], "detail": f"joint step {biggest:.3f} > {c['max_abs']}"})
+                    delta = delta * (c["max_abs"] / biggest)
+                    escalate("clamp")
+
+            elif kind == "joint_limits":
+                low, high = np.asarray(c["low"], float), np.asarray(c["high"], float)
+                nxt = pos + delta
+                if np.any(nxt < low) or np.any(nxt > high):
+                    violations.append({"constraint": c["name"], "detail": "target is past a joint limit"})
+                    delta = np.clip(nxt, low, high) - pos
+                    escalate("clamp")
+
+            elif kind in ("cartesian_box", "cartesian_keep_out_sphere"):
+                # Where would this move put the arm? Checked for every tracked point, not just the gripper.
+                def bad(d):
+                    pts = self.fk(pos + d)
+                    if kind == "cartesian_box":
+                        return bool(np.any(pts < np.asarray(c["low"], float)) or np.any(pts > np.asarray(c["high"], float)))
+                    return bool(np.any(np.linalg.norm(pts - np.asarray(c["center"], float), axis=1) < c["radius"]))
+
+                if bad(delta) and not bad(np.zeros_like(delta)):  # if already in violation, let it move so it can leave
+                    what = "leaves the allowed space" if kind == "cartesian_box" else "enters a keep-out zone"
+                    violations.append({"constraint": c["name"], "detail": f"the arm {what}"})
+                    # Shorten the move until it is safe; hold still if no shorter move is.
+                    for scale in (0.5, 0.25, 0.1):
+                        if not bad(delta * scale):
+                            delta = delta * scale
+                            escalate("clamp")
+                            break
                     else:
                         delta = np.zeros_like(delta)
                         escalate("block")

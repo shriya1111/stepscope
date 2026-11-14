@@ -51,6 +51,7 @@ class Hazard:
 class Scene:
     hazards: list[Hazard] = field(default_factory=list)
     extent: float = 1.0  # workspace size, for drawing
+    unit: str = ""  # shown next to distances ("px", "m")
     robot_radius: float = 0.0  # added to every hazard radius
     speed_ref: float = 1.0  # speed (units per step) treated as "full speed"
     proximity_scale: float = 1.0  # distance at which proximity risk has fallen to ~37%
@@ -77,11 +78,11 @@ class Scene:
 def path_clearance(points: np.ndarray, hazard: Hazard, robot_radius: float = 0.0) -> tuple[float, int | None]:
     """(closest approach to the hazard's edge, first index that touches it or None).
 
-    points: (T, 2) positions along a path, checked along the segments between them.
+    points: (T, D) positions along a path (D = 2 or 3), checked along the segments between them.
     Negative clearance means the path goes inside the hazard.
     """
-    pts = np.asarray(points, dtype=float).reshape(-1, 2)
     c = np.asarray(hazard.center, dtype=float)
+    pts = np.asarray(points, dtype=float).reshape(-1, len(c))
     r = hazard.radius + robot_radius
     if len(pts) == 1:
         d = np.array([np.linalg.norm(pts[0] - c)])
@@ -98,15 +99,25 @@ def path_clearance(points: np.ndarray, hazard: Hazard, robot_radius: float = 0.0
 def assess(position: np.ndarray, plans: np.ndarray, speed: float, scene: Scene) -> dict:
     """Safety of acting from `position` given sampled future paths.
 
-    plans: (N, T, 2) future positions for each sampled plan; plans[0] is the one
-    being executed. Returns the worst hazard's numbers.
+    plans: (N, T, D) future positions for each sampled plan, or (N, T, P, D)
+    when P points on the robot are tracked (each link, the gripper...);
+    plans[0] is the plan being executed. position is (D,) or (P, D) to match.
+    Works in 2D or 3D. Returns the worst hazard's numbers.
     """
-    pos = np.asarray(position, dtype=float).reshape(1, 2)
     plans = np.asarray(plans, dtype=float)
+    if plans.ndim == 3:
+        plans = plans[:, :, None, :]
+    n, _, n_pts, dim = plans.shape
+    pos = np.asarray(position, dtype=float).reshape(n_pts, dim)
     speed_factor = float(np.clip((speed / scene.speed_ref) ** 2, 0.1, 1.0))  # consequence grows with kinetic energy
     out = {"clearance": float("inf"), "time_to_contact": None, "p_contact": 0.0, "severity": 0, "risk": 0.0, "hazard": None}
     for h in scene.hazards:
-        results = [path_clearance(np.concatenate([pos, p]), h, scene.robot_radius) for p in plans]
+        # For each sampled plan: the closest any tracked point comes, and the first step that touches.
+        results = []
+        for i in range(n):
+            per_point = [path_clearance(np.concatenate([pos[k : k + 1], plans[i, :, k]]), h, scene.robot_radius) for k in range(n_pts)]
+            hits = [r[1] for r in per_point if r[1] is not None]
+            results.append((min(r[0] for r in per_point), min(hits) if hits else None))
         clear, ttc = results[0]
         hit_share = float(np.mean([r[1] is not None for r in results]))
         p = max(hit_share, float(np.exp(-max(clear, 0.0) / scene.proximity_scale)))
@@ -123,7 +134,9 @@ def assess(position: np.ndarray, plans: np.ndarray, speed: float, scene: Scene) 
 
 
 def risk_grid(scene: Scene, n: int = 32, speed: float | None = None) -> list[list[float]]:
-    """Risk of standing still at each cell of an n x n grid over the workspace (for the map overlay)."""
+    """Risk of standing still at each cell of an n x n grid over the workspace (2D scenes only)."""
+    if any(len(h.center) != 2 for h in scene.hazards):
+        return []
     speed = scene.speed_ref if speed is None else speed
     out = []
     for iy in range(n):
@@ -135,12 +148,24 @@ def risk_grid(scene: Scene, n: int = 32, speed: float | None = None) -> list[lis
     return out
 
 
-def annotate_run(run_dir: str | Path, scene: Scene, position_dims=(0, 1), plans_key: str = "plans", plan_offset: int = 1) -> dict:
+def annotate_run(
+    run_dir: str | Path,
+    scene: Scene,
+    position_dims=(0, 1),
+    plans_key: str = "plans",
+    plan_offset: int = 1,
+    points_key: str | None = None,
+    plan_stride: int = 1,
+) -> dict:
     """Score every step of every episode in a run against the scene.
 
-    Needs sampled plans in the traces (internals[plans_key], shape (N, H, 2) in
-    workspace units). plan_offset is the index in a plan of the first action
-    that is executed. Writes <episode>/safety.json and <run>/scene.json.
+    Needs sampled future paths in the traces: internals[plans_key], shape
+    (N, H, D) or (N, H, P, D) in workspace units, recorded at each decision.
+    plan_offset is the index of the first point that lies ahead of the robot at
+    decision time; plan_stride is how many control steps apart the points are.
+    The robot's current position comes from state[position_dims], or, when
+    several points are tracked, from internals[points_key] (one (P, D) array per
+    step). Writes <episode>/safety.json and <run>/scene.json.
     """
     run_dir = Path(run_dir)
     dump_json(run_dir / "scene.json", {**scene.to_dict(), "risk_grid": risk_grid(scene)})
@@ -151,18 +176,24 @@ def annotate_run(run_dir: str | Path, scene: Scene, position_dims=(0, 1), plans_
         if plans_key not in z:
             continue
         df = read_steps(run_dir, ep)
-        pos = np.stack(df["state"].to_numpy())[:, list(position_dims)].astype(float)
-        speed = np.linalg.norm(np.stack(df["executed"].to_numpy())[:, :2], axis=1)
+        if points_key:
+            pos = z[points_key].astype(float)  # (T, P, D)
+        else:
+            pos = np.stack(df["state"].to_numpy())[:, list(position_dims)].astype(float)[:, None, :]
+        travel = np.linalg.norm(np.diff(pos, axis=0), axis=-1).max(axis=-1)  # fastest tracked point, per step
+        speed = np.append(travel, travel[-1] if len(travel) else 0.0)
         ts = z[f"{plans_key}__t"]
         cols: dict[str, list] = {k: [] for k in ("clearance", "time_to_contact", "p_contact", "severity", "risk", "hazard", "level", "inside")}
         for t in range(len(df)):
             i = int(np.searchsorted(ts, t, side="right") - 1)
-            k = t - int(ts[i])  # steps into the current plan
+            k = (t - int(ts[i])) // plan_stride  # points of the current plan already behind us
             plans = z[plans_key][i][:, plan_offset + k :]
             if plans.shape[1] == 0:
                 plans = z[plans_key][i][:, -1:]
             a = assess(pos[t], plans, float(speed[t]), scene)
-            inside = any(np.linalg.norm(pos[t] - np.asarray(h.center)) <= h.radius + scene.robot_radius for h in scene.hazards)
+            inside = any(
+                np.linalg.norm(p - np.asarray(h.center)) <= h.radius + scene.robot_radius for h in scene.hazards for p in pos[t]
+            )
             for key in cols:
                 cols[key].append(inside if key == "inside" else a[key])
         peak = float(np.max(cols["risk"])) if cols["risk"] else 0.0
