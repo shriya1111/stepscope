@@ -124,6 +124,9 @@ Results over 50 episodes (replanning every 50 steps, 6 candidate plans):
   variable (plans from different latents differ by about 0.0001 rad), so the
   candidates are dropout samples; they sit within about a centimetre of each
   other at the gripper.
+- **The shield made no measurable difference.** On the 25 held-out seeds, 21
+  succeeded with it and 20 without. No candidate plan was ever predicted to touch
+  a hazard, so it had nothing to avoid; it switched plans at 11 of 166 decisions.
 - The policy replans every 50 steps here; LeRobot's stock setting is every 100.
 
 ## Running on a real SO-100 / SO-101 arm
