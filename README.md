@@ -62,6 +62,31 @@ simulator and its failure modes were written alongside the metrics, so the
 metrics are well matched to them. The numbers that matter will come from a real
 policy (see the roadmap).
 
+## Results on a real policy (LeRobot diffusion policy, PushT)
+
+`lerobot/diffusion_pusht` (263M parameters), run on CPU with DDIM 8 steps and 6
+sampled plans per decision. 60 episodes, 55% task success.
+
+- **Failure prediction does not work here yet.** Cross-validated over the 60
+  episodes, the risk score ranks failing episodes no better than chance (AUROC
+  0.44 to 0.54 at steps 20, 60 and 100), with the built-in metrics and with the
+  model-internal signals (plan shift, plan options, sample spread, embedding
+  novelty). The simulator numbers above did not transfer.
+- **The shield made no measurable difference.** On 30 paired seeds with the
+  demo hazard scene, executing the sampled plan with the best predicted future
+  gave 20/30 task successes against 18/30 without it (6 episodes flipped to
+  success, 4 to failure), and the share of steps spent inside a hazard zone was
+  12.8% against 12.5%. The shield switched plans at 40% of decisions, but this
+  policy's six sampled plans are usually within a few pixels of each other, so
+  there is rarely a safer one to switch to.
+- **What does work on the real policy** is the inspection: sampled plans and
+  attention points on the camera frame, the situation map, deep dives
+  (debugger, cause map, what-if, predicted futures) and per-step safety scores.
+
+The demo hazard scene (`examples/pusht_scene.yaml`) sits where the pusher often
+travels and the policy cannot see it, so nearly every episode reaches high
+safety risk. It shows the scoring working, not a realistic risk level.
+
 ## Trace your own policy
 
 ```python

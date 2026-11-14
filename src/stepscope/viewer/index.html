@@ -181,7 +181,7 @@ function route() {
   const app = $("app");
   if (!RUNS.length) { app.replaceChildren(el("div", { class: "empty" }, "No runs found. Create some with: stepscope demo")); return; }
   const m = (STATIC ? ROUTE : location.hash).match(/^#\/run\/([^/]+)(?:\/ep\/([^/]+)(?:\/t\/(\d+))?)?/);
-  const pick = RUNS.find((r) => r.name === "eval") || RUNS[0];
+  const pick = RUNS.find((r) => STATIC && r.name === STATIC.default_run) || RUNS.find((r) => r.name === "eval") || RUNS[0];
   const run = m && RUNS.some((r) => r.name === m[1]) ? m[1] : pick.name;
   $("runsel").value = run;
   if (m && m[2]) episodeView(run, m[2], m[3] === undefined ? null : +m[3]); else fleetView(run);

@@ -54,7 +54,8 @@ def export_html(runs_root: str | Path, out: str | Path, runs: list[str] | None =
             frames[f"{d.name}/{ep}"] = uri
         used += len(body) + len(uri)
         included += 1
-    data = json.dumps({"api": _round(api), "frames": frames}, separators=(",", ":")).replace("</", "<\\/")
+    payload = {"api": _round(api), "frames": frames, "default_run": runs[0] if runs else None}
+    data = json.dumps(payload, separators=(",", ":")).replace("</", "<\\/")
     html = (VIEWER_DIR / "index.html").read_text().replace("/*STEPSCOPE_DATA*/", f"window.STEPSCOPE_DATA = {data};", 1)
     Path(out).write_text(html)
     return {"episodes_total": len(queue), "episodes_with_steps": included, "bytes": len(html.encode())}
