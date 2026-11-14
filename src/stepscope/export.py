@@ -34,17 +34,20 @@ def export_html(runs_root: str | Path, out: str | Path, runs: list[str] | None =
     for d in dirs:
         payload = run_payload(d)
         api[f"runs/{d.name}"] = payload
+        first_run = bool(runs) and d.name == runs[0]
         for i, e in enumerate(payload["episodes"]):
             interesting = e["success"] is not True or e["first_alert_step"] is not None
-            if e.get("deepdives"):
-                interesting = True
-                i = -1  # episodes with deep dives go first
-            queue.append((-1 if i < 0 else 0 if interesting else 1, i, d, e["episode_id"]))
+            # Order of preference: episodes with deep dives, then the run the page opens on,
+            # then failed or alerted episodes of the other runs, then everything else.
+            rank = 0 if e.get("deepdives") else 1 if first_run else 2 if interesting else 3
+            queue.append((rank, i, d, e["episode_id"]))
     budget, used, included = max_mb * 1e6, 0, 0
     used += len(json.dumps(_round(api)))
     for _, _, d, ep in sorted(queue, key=lambda q: q[:2]):
         ep_dir = d / "episodes" / ep
-        body = json.dumps(_round(episode_payload(ep_dir, situation_index(d)), 2 if (ep_dir / "internals.npz").exists() else 4), separators=(",", ":"))
+        # Pixel-space runs keep 2 decimals; runs in metres and radians need more.
+        digits = 4 if api[f"runs/{d.name}"]["run"].get("scene3d") or not (ep_dir / "internals.npz").exists() else 2
+        body = json.dumps(_round(episode_payload(ep_dir, situation_index(d)), digits), separators=(",", ":"))
         png = ep_dir / "frames.png"
         uri = "data:image/png;base64," + base64.b64encode(png.read_bytes()).decode() if png.exists() else ""
         if used + len(body) + len(uri) > budget:
