@@ -87,6 +87,56 @@ The demo hazard scene (`examples/pusht_scene.yaml`) sits where the pusher often
 travels and the policy cannot see it, so nearly every episode reaches high
 safety risk. It shows the scoring working, not a realistic risk level.
 
+## 3D: a real ACT policy on simulated arms (ALOHA, MuJoCo)
+
+`lerobot/act_aloha_sim_transfer_cube_human` drives two 6-joint arms that hand a
+cube from one to the other. stepscope traces it in 3D: the position of every arm
+link (forward kinematics), the candidate plans as 3D paths, the decoder's
+attention over the camera image, and the full physics state at every step.
+
+```bash
+pip install mujoco dm-env dm-tree lxml pyopengl glfw scipy absl-py && pip install --no-deps dm_control gym-aloha
+```
+
+```bash
+MUJOCO_GL=egl python -m stepscope.adapters.lerobot_aloha --run runs/aloha --episodes 50 --replan 50 --futures --scene examples/aloha_scene.yaml
+```
+
+```bash
+stepscope safety --run runs/aloha --scene examples/aloha_scene.yaml --plans-key plans_xyz --points-key arm --plan-offset 0 --plan-stride 5
+```
+
+```bash
+MUJOCO_GL=egl python -m stepscope.adapters.aloha_deepdive --run runs/aloha --auto 2 --every 2 --scene examples/aloha_scene.yaml
+```
+
+Results over 50 episodes (replanning every 50 steps, 6 candidate plans):
+
+- **Task success: 44 of 50.**
+- **Failure prediction** (5-fold cross-validation, built-in metrics): 5 of the 6
+  failures flagged, 3 false alarms in 44 successes, a median 194 steps before the
+  end of a 400-step episode. The risk score separates failing from succeeding
+  episodes well by mid-episode (AUROC 0.86 at step 200) and weakly before that
+  (0.5 to 0.65). With only 6 failures these numbers are indicative, not settled.
+- **Safety scoring** against `examples/aloha_scene.yaml`: 6 of 15,586 steps at
+  high risk, 238 at medium, none inside a hazard zone.
+- **Candidate plans are close together.** This checkpoint ignores ACT's latent
+  variable (plans from different latents differ by about 0.0001 rad), so the
+  candidates are dropout samples; they sit within about a centimetre of each
+  other at the gripper.
+- The policy replans every 50 steps here; LeRobot's stock setting is every 100.
+
+## Running on a real SO-100 / SO-101 arm
+
+`StepscopeGuard` (`src/stepscope/adapters/lerobot_robot.py`) wraps LeRobot's robot
+interface: read the observation, run your policy, pass the action through
+stepscope, send it. It starts in **shadow mode**, where the gate's verdict is
+recorded and the arm's motion is never changed. Steps for a first run, including
+how to check the joint mapping with a ruler, are in [docs/so101.md](docs/so101.md).
+
+It has been tested against a simulated stand-in with the same interface, not on
+hardware, and the gate is a software check, not an emergency stop.
+
 ## Trace your own policy
 
 ```python
