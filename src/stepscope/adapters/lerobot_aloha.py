@@ -328,7 +328,14 @@ def main(argv: list[str] | None = None) -> None:
         run_meta={
             "label": f"ACT on ALOHA cube transfer, MuJoCo ({REPO}), replanning every {args.replan} steps, {args.samples} candidate plans",
             "overlay": {"plan_extent": cam.width, "unit": "m"},
-            "scene3d": {"links": LINKS, "grippers": GRIPPERS, "table": [[-0.6, 0.0], [0.6, 1.2]], "path_stride": PATH_STRIDE},
+            "scene3d": {
+                "links": LINKS,
+                "grippers": GRIPPERS,
+                "table": [[-0.6, 0.0], [0.6, 1.2]],
+                "path_stride": PATH_STRIDE,
+                # The cube's position sits at these indices of the saved physics state.
+                "objects": [{"name": "cube", "snapshot_index": [16, 17, 18], "size": 0.02}],
+            },
             "shield": bool(args.shield),
         },
     )

@@ -145,7 +145,9 @@ def cmd_situations(args: argparse.Namespace) -> None:
 def cmd_safety(args: argparse.Namespace) -> None:
     from .safety import Scene, annotate_run
 
-    t = annotate_run(args.run, Scene.from_file(args.scene))
+    t = annotate_run(
+        args.run, Scene.from_file(args.scene), plans_key=args.plans_key, plan_offset=args.plan_offset, points_key=args.points_key, plan_stride=args.plan_stride
+    )
     print(f"Scored {t['steps']} steps in {t['episodes']} episodes: {t['high']} at high risk, {t['medium']} at medium, {t['contacts']} inside a hazard zone")
 
 
@@ -207,7 +209,11 @@ def main(argv: list[str] | None = None) -> None:
 
     sf = sub.add_parser("safety", help="score every traced step against a scene of hazards")
     sf.add_argument("--run", required=True)
-    sf.add_argument("--scene", required=True, help="YAML scene file (see examples/pusht_scene.yaml)")
+    sf.add_argument("--scene", required=True, help="YAML scene file (see examples/pusht_scene.yaml, examples/aloha_scene.yaml)")
+    sf.add_argument("--plans-key", default="plans", help="internals key holding the sampled future paths")
+    sf.add_argument("--points-key", help="internals key holding the tracked robot points per step (e.g. arm)")
+    sf.add_argument("--plan-offset", type=int, default=1, help="index of the first plan point that lies ahead of the robot")
+    sf.add_argument("--plan-stride", type=int, default=1, help="control steps between stored plan points")
     sf.set_defaults(fn=cmd_safety)
 
     args = p.parse_args(argv)

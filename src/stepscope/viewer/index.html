@@ -361,8 +361,13 @@ async function episodeView(run, epId, startStep) {
   const show = { plans: true, points: true, hazards: true };
   const scene = runInfo.scene, safety = data.safety, deep = data.deepdive || {};
   const deepSteps = Object.keys(deep).map(Number).sort((a, b) => a - b);
+  const s3 = data.scene3d, is3d = !!s3;
+  const unit = (scene && scene.unit) || overlay.unit || "px";
+  // Distances: metres are shown as centimetres, anything else as whole units.
+  const dist = (v) => (v === null || v === undefined ? "–" : unit === "m" ? (100 * v).toFixed(1) + " cm" : Math.round(v) + " " + unit);
+  const polylines = (plan) => (Array.isArray(plan[0][0]) ? plan : [plan]);  // a plan may be one path or one per gripper
   const drawHazards = (ctx, size) => {
-    if (!scene) return;
+    if (!scene || is3d) return;  // 3D hazards are drawn in the 3D scene panel, not on the camera image
     const k = size / scene.extent;
     for (const h of scene.hazards) {
       ctx.beginPath(); ctx.arc(h.center[0] * k, h.center[1] * k, h.radius * k, 0, 6.3);
@@ -378,7 +383,8 @@ async function episodeView(run, epId, startStep) {
   const updaters = [];
 
   // --- camera ---
-  const cam = el("canvas", { id: "cam", width: 288, height: 288 });
+  const camH = meta.frames ? Math.round(288 * meta.frames.height / meta.frames.width) : 288;
+  const cam = el("canvas", { id: "cam", width: 288, height: camH, style: `aspect-ratio:288/${camH}` });
   const img = new Image();
   if (meta.frames) { img.onload = () => setStep(cur); img.src = STATIC ? (STATIC.frames[run + "/" + epId] || "") : `/api/runs/${encodeURIComponent(run)}/episodes/${encodeURIComponent(epId)}/frames.png`; }
   function drawFrame(t) {
@@ -397,11 +403,19 @@ async function episodeView(run, epId, startStep) {
         ctx.beginPath(); ctx.arc(x * k, y * k, 1.8, 0, 6.3); ctx.fillStyle = css("--s7"); ctx.fill();
       }
     }
+    if (show.points && d.attention) {  // attention heat map: where on the image the model is reading from
+      const flat = d.attention.flat(), rows = d.attention.length, cols = d.attention[0].length, w = cam.width / cols, h = cam.height / rows;
+      const lo = [...flat].sort((a, b) => a - b)[flat.length >> 1], top = Math.max(...flat);  // only patches above the median are tinted
+      d.attention.forEach((row, y) => row.forEach((v, x) => { const a = Math.max(0, (v - lo) / (top - lo || 1));
+        if (a > 0.08) { ctx.fillStyle = `rgba(98,80,214,${0.75 * a * a})`; ctx.fillRect(x * w, y * h, w + .5, h + .5); } }));
+    }
     if (show.plans && overlay.plan_extent) {
       const k = cam.width / overlay.plan_extent;
       const draw = (plan, color, width) => {
-        ctx.beginPath(); plan.forEach(([x, y], j) => (j ? ctx.lineTo(x * k, y * k) : ctx.moveTo(x * k, y * k)));
-        ctx.lineJoin = "round"; ctx.lineCap = "round"; ctx.strokeStyle = color; ctx.lineWidth = width; ctx.stroke();
+        for (const line of polylines(plan)) {
+          ctx.beginPath(); line.forEach(([x, y], j) => (j ? ctx.lineTo(x * k, y * k) : ctx.moveTo(x * k, y * k)));
+          ctx.lineJoin = "round"; ctx.lineCap = "round"; ctx.strokeStyle = color; ctx.lineWidth = width; ctx.stroke();
+        }
       };
       for (let j = d.plans.length - 1; j >= 0; j--) {  // executed plan (index 0) drawn last, on top
         if (j === 0) draw(d.plans[j], "#fff", 5.5);
@@ -434,6 +448,65 @@ async function episodeView(run, epId, startStep) {
     el("dt", {}, "Symptoms at alert"), el("dd", {}, (meta.causes || []).length ? causes : "–"),
     sim && sim.cause ? [el("dt", {}, "Simulator ground truth"), el("dd", {}, sim.cause)] : null);
 
+  // --- 3D scene: the arm, its recent path, the candidate plans and the hazards ---
+  let scene3dCard = null, draw3d = () => {};
+  if (is3d) {
+    const cfg = runInfo.run.scene3d || {}, W3 = 620, H3 = 400;
+    const c3 = el("canvas", { width: W3 * 2, height: H3 * 2, "aria-label": "3D view of the robot arms, plans and hazards",
+      style: `width:100%;max-width:${W3}px;aspect-ratio:${W3}/${H3};touch-action:none;cursor:grab;border-radius:6px;background:var(--raised);display:block` });
+    const g = c3.getContext("2d"); g.scale(2, 2);
+    const view = { yaw: -0.55, pitch: 0.5 };
+    const table = cfg.table || [[-0.6, 0], [0.6, 1.2]];
+    const centre = [(table[0][0] + table[1][0]) / 2, (table[0][1] + table[1][1]) / 2, 0.12];
+    const S = W3 / (1.45 * (table[1][0] - table[0][0]));
+    // Orthographic view: turn the scene about the vertical axis, then tilt it toward the viewer.
+    const P = ([x, y, z]) => { x -= centre[0]; y -= centre[1]; z -= centre[2];
+      const x1 = x * Math.cos(view.yaw) - y * Math.sin(view.yaw), y1 = x * Math.sin(view.yaw) + y * Math.cos(view.yaw);
+      return [W3 / 2 + S * x1, H3 / 2 + 36 - S * (z * Math.cos(view.pitch) + y1 * Math.sin(view.pitch))]; };
+    const poly = (pts, stroke, width, fill, dash) => { g.beginPath(); pts.forEach((p, i) => { const [a, b] = P(p); i ? g.lineTo(a, b) : g.moveTo(a, b); });
+      if (fill) { g.closePath(); g.fillStyle = fill; g.fill(); } g.setLineDash(dash || []); g.lineJoin = "round"; g.lineCap = "round";
+      if (stroke) { g.strokeStyle = stroke; g.lineWidth = width; g.stroke(); } g.setLineDash([]); };
+    const ring = (c, r, z) => Array.from({ length: 33 }, (_, i) => [c[0] + r * Math.cos(i * 6.2832 / 32), c[1] + r * Math.sin(i * 6.2832 / 32), z]);
+    draw3d = (t) => {
+      g.clearRect(0, 0, W3, H3);
+      const [[x0, y0], [x1, y1]] = table;
+      poly([[x0, y0, 0], [x1, y0, 0], [x1, y1, 0], [x0, y1, 0]], css("--line"), 1, css("--grid"));
+      for (let x = Math.ceil(x0 * 5) / 5; x <= x1 + 1e-9; x += 0.2) poly([[x, y0, 0], [x, y1, 0]], css("--line"), 0.5);
+      for (let y = Math.ceil(y0 * 5) / 5; y <= y1 + 1e-9; y += 0.2) poly([[x0, y, 0], [x1, y, 0]], css("--line"), 0.5);
+      for (const h of (scene ? scene.hazards : [])) {
+        poly(ring(h.center, h.radius, 0), null, 0, "rgba(208,59,59,.14)");            // shadow on the table
+        poly([[h.center[0], h.center[1], 0], h.center], css("--critical"), 1, null, [3, 3]);  // its height
+        const [cx, cy] = P(h.center);
+        g.beginPath(); g.arc(cx, cy, S * h.radius, 0, 6.2832); g.fillStyle = "rgba(208,59,59,.25)"; g.fill(); g.strokeStyle = css("--critical"); g.lineWidth = 1.5; g.stroke();
+        poly(ring(h.center, h.radius, h.center[2]), css("--critical"), 0.75);
+        g.font = "600 11px system-ui"; g.textAlign = "center"; g.fillStyle = css("--text"); g.fillText(h.name, cx, cy - S * h.radius - 5);
+      }
+      for (const o of (s3.objects || [])) { const [ox, oy] = P(o.path[Math.min(t, o.path.length - 1)]), half = S * (o.size || 0.02);
+        g.fillStyle = css("--s2"); g.fillRect(ox - half, oy - half, 2 * half, 2 * half); g.strokeStyle = css("--surface"); g.lineWidth = 1.5; g.strokeRect(ox - half, oy - half, 2 * half, 2 * half);
+        g.font = "11px system-ui"; g.textAlign = "left"; g.fillStyle = css("--text-2"); g.fillText(o.name, ox + half + 4, oy + 4); }
+      const grippers = cfg.grippers || [s3.arm[0].length - 1];
+      for (const gi of grippers) poly(s3.arm.slice(Math.max(0, t - 120), t + 1).map((a) => a[gi]), css("--text-3"), 1.25);  // where the gripper has just been
+      const d = decisionAt(t);
+      if (d && d.plans_xyz && show.plans) for (let j = d.plans_xyz.length - 1; j >= 0; j--) for (const line of d.plans_xyz[j]) {
+        if (j === 0) poly(line, css("--surface"), 5.5);
+        poly(line, css(SERIES[d.modes[j] % SERIES.length]), j === 0 ? 3 : 1.25); }
+      const arm = s3.arm[Math.min(t, s3.arm.length - 1)];
+      for (const [a, b] of (cfg.links || [])) { poly([arm[a], arm[b]], css("--surface"), 9); poly([arm[a], arm[b]], css("--text"), 5); }
+      arm.forEach((p, i) => { const [a, b] = P(p), tip = grippers.includes(i); g.beginPath(); g.arc(a, b, tip ? 6 : 3.5, 0, 6.2832); g.fillStyle = tip ? css("--s1") : css("--text"); g.fill(); g.strokeStyle = css("--surface"); g.lineWidth = 2; g.stroke(); });
+    };
+    let drag = null;
+    c3.addEventListener("pointerdown", (ev) => { drag = [ev.clientX, ev.clientY, view.yaw, view.pitch]; c3.setPointerCapture(ev.pointerId); c3.style.cursor = "grabbing"; });
+    c3.addEventListener("pointermove", (ev) => { if (!drag) return; view.yaw = drag[2] + (ev.clientX - drag[0]) * 0.01; view.pitch = Math.max(0.05, Math.min(1.5, drag[3] + (ev.clientY - drag[1]) * 0.01)); draw3d(cur); });
+    const stop = () => { drag = null; c3.style.cursor = "grab"; };
+    c3.addEventListener("pointerup", stop); c3.addEventListener("pointercancel", stop);
+    const key = (color, label, shape) => el("span", {}, el("i", { style: `background:${color};${shape || ""}` }), label);
+    scene3dCard = el("div", { class: "card", style: "margin-bottom:14px" },
+      el("h2", {}, "3D scene · drag to rotate"), c3,
+      el("div", { class: "legend", style: "margin:8px 0 0" }, key("var(--text)", "arm links"), key("var(--s1)", "gripper · executed plan", "border-radius:50%"),
+        key("var(--text-3)", "recent gripper path"), (s3.objects || []).length ? key("var(--s2)", s3.objects.map((o) => o.name).join(", ")) : null,
+        scene ? key("var(--critical)", "hazard zone", "border-radius:50%;opacity:.6") : null));
+  }
+
   // --- what the model is deciding ---
   let decidingCard = null, decideBody = null, lastDecision = undefined;
   if (decisions) {
@@ -442,7 +515,7 @@ async function episodeView(run, epId, startStep) {
     decideBody = el("div");
     decidingCard = el("div", { class: "card", style: "margin-bottom:14px" },
       el("div", { class: "row", style: "margin:0 0 8px" }, el("h2", { style: "margin:0" }, "What the model is deciding"), el("span", { style: "flex:1" }),
-        overlay.plan_extent ? toggle("plans", "Draw sampled plans") : null, toggle("points", "Draw attention points"), scene ? toggle("hazards", "Draw hazards") : null),
+        overlay.plan_extent ? toggle("plans", "Draw sampled plans") : null, toggle("points", is3d ? "Draw attention" : "Draw attention points"), scene && !is3d ? toggle("hazards", "Draw hazards") : null),
       decideBody);
   }
   function renderDecision(d) {
@@ -603,7 +676,7 @@ async function episodeView(run, epId, startStep) {
 
     // subtask band
     const names = [];
-    steps.belief.forEach((b, t) => { const k = steps.plan_step[t]; if (k >= 0 && b.subtask !== undefined && names[k] === undefined) names[k] = b.subtask; });
+    steps.belief.forEach((b, t) => { const k = steps.plan_step[t]; const nm = b.subtask ?? b.stage; if (k >= 0 && nm !== undefined && names[k] === undefined) names[k] = nm; });
     if (steps.plan_step.some((k) => k >= 0)) {
       const c = frame("Subtask", "what the policy believes it is doing", 34), half = (W - L - R) / Math.max(n - 1, 1) / 2;
       let start = 0;
@@ -638,7 +711,7 @@ async function episodeView(run, epId, startStep) {
 
     if (safety) {
       line("Safety risk", "chance of contact × severity × speed · 0.1 = medium, 0.4 = high", safety.risk, { min: 0, max: 1, area: true });
-      line("Clearance to nearest hazard", "closest the current plan comes (px); below 0 is inside the hazard", safety.clearance.map((v) => Math.max(v, 0)), {});
+      line("Clearance to nearest hazard", `closest the current plan comes (${unit}); 0 means it touches the hazard`, safety.clearance.map((v) => Math.max(v, 0)), {});
     }
     if (deepSteps.length) {
       const c = frame("Deep dives", "decisions where the model was re-run and analysed", 30);
@@ -662,9 +735,10 @@ async function episodeView(run, epId, startStep) {
     drawFrame(cur);
     renderDecision(decisionAt(cur));
     renderDeep();
+    draw3d(cur);
     stepno.textContent = `step ${cur} / ${n - 1}`;
     const b = steps.belief[cur] || {};
-    dd["Subtask"].textContent = b.subtask ?? "–";
+    dd["Subtask"].textContent = b.subtask ?? b.stage ?? "–";
     const rest = Object.entries(b).filter(([k]) => k !== "subtask").map(([k, v]) => k.replaceAll("_", " ") + ": " + (Array.isArray(v) ? v.join(", ") : v));
     dd["Belief"].textContent = rest.join(" · ") || "–";
     dd["Risk"].textContent = steps.risk[cur] === null ? "–" : fmt(steps.risk[cur]) + (alertCfg ? (steps.risk[cur] >= alertCfg.threshold ? "  (above alert threshold)" : "") : "");
@@ -674,20 +748,20 @@ async function episodeView(run, epId, startStep) {
     dd["Gate"].textContent = steps.verdict[cur] + (viol ? " · " + viol : "");
     if (safety) { const lv = safety.level[cur], ttc = safety.time_to_contact[cur];
       dd["Safety"].replaceChildren(el("span", { class: "lvl " + lv }, el("i"), `${lv} risk (${fmt(safety.risk[cur])})`),
-        ` · nearest hazard: ${safety.hazard[cur]}, ${fmt(Math.max(safety.clearance[cur], 0), 0)} px clear` + (ttc !== null ? ` · plan reaches it in ${ttc} steps` : "") + (safety.inside[cur] ? " · INSIDE hazard zone" : "")); }
+        ` · nearest hazard: ${safety.hazard[cur]}, ${dist(Math.max(safety.clearance[cur], 0))} clear` +(ttc !== null ? ` · plan reaches it in ${ttc} steps` : "") + (safety.inside[cur] ? " · INSIDE hazard zone" : "")); }
     for (const u of updaters) u(cur);
   }
 
-  const nav = el("div", { class: "row", style: "margin:0 0 12px" },
+  const navRow = el("div", { class: "row", style: "margin:0 0 12px" },
     el("a", { class: "back", style: "margin:0", href: "#/run/" + run, onclick: (ev) => { ev.preventDefault(); nav("#/run/" + run); } }, "← All episodes in " + run),
     el("span", { style: "flex:1" }),
     el("button", { onclick: () => nav(`#/run/${run}/ep/${ids[at - 1]}`), ...(at <= 0 ? { disabled: "" } : {}) }, "Previous episode"),
     el("button", { onclick: () => nav(`#/run/${run}/ep/${ids[at + 1]}`), ...(at >= ids.length - 1 ? { disabled: "" } : {}) }, "Next episode"));
-  app.replaceChildren(nav, el("h1", {}, epId), el("p", { class: "sub" }, meta.task || ""),
+  app.replaceChildren(navRow, el("h1", {}, epId), el("p", { class: "sub" }, meta.task || ""),
     el("div", { class: "ep-top" },
       el("div", { class: "card" }, cam, controls),
       el("div", { class: "card" }, el("h2", {}, "Episode"), summary, el("h2", {}, "At the selected step"), readout)),
-    decidingCard, deepCard, chartsCard);
+    scene3dCard, decidingCard, deepCard, chartsCard);
   build();
   let rz; window.onresize = () => { clearTimeout(rz); rz = setTimeout(build, 120); };
   document.onkeydown = (ev) => {

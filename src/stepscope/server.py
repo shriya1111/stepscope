@@ -80,6 +80,7 @@ def decisions_payload(d: Path, index: SituationIndex | None = None) -> dict | No
     if "plans" not in z:
         return None
     index = index or situation_index(d.parent.parent)
+    grippers = (read_run_meta(d.parent.parent).get("scene3d") or {}).get("grippers") or [-1]
     near = index.neighbours(d.name)
     xy = {}
     if not index.empty:
@@ -96,6 +97,9 @@ def decisions_payload(d: Path, index: SituationIndex | None = None) -> dict | No
                 "plans": z["plans"][i].tolist(),
                 "modes": modes,
                 "keypoints": z["keypoints"][i].tolist() if "keypoints" in z else None,
+                "attention": np.round(z["attention"][i], 4).tolist() if "attention" in z else None,
+                # 3D path of each gripper under each candidate plan: (plans, grippers, points, 3)
+                "plans_xyz": np.round(z["plans_xyz"][i][:, :, grippers].transpose(0, 2, 1, 3), 3).tolist() if "plans_xyz" in z else None,
                 "denoise_spread": spread,
                 "denoise_path": z["denoise_path"][i][:, ::3].tolist() if "denoise_path" in z else None,
                 "map": xy.get(t),
@@ -106,10 +110,24 @@ def decisions_payload(d: Path, index: SituationIndex | None = None) -> dict | No
     return {"decisions": out}
 
 
+def scene3d_payload(d: Path) -> dict | None:
+    """Arm link positions per step, and tracked objects, for the 3D view (None if not recorded)."""
+    z = read_internals(d.parent.parent, d.name)
+    if "arm" not in z:
+        return None
+    cfg = read_run_meta(d.parent.parent).get("scene3d") or {}
+    objects = []
+    for o in cfg.get("objects", []):  # an object's position is read out of the saved simulator state
+        if "snapshot" in z:
+            objects.append({"name": o["name"], "size": o.get("size", 0.02), "path": np.round(z["snapshot"][:, o["snapshot_index"]], 3).tolist()})
+    return {"arm": np.round(z["arm"].astype(float), 3).tolist(), "objects": objects}
+
+
 def episode_payload(d: Path, index: SituationIndex | None = None) -> dict:
     df = read_steps(d.parent.parent, d.name)
     return {
         "decisions": decisions_payload(d, index),
+        "scene3d": scene3d_payload(d),
         "safety": _read_json(d / "safety.json"),
         "deepdive": read_deepdive(d, compact=True),
         "meta": _read_json(d / "meta.json"),

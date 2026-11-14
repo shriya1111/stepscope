@@ -1,0 +1,13 @@
+# Hazards around the ALOHA table, in metres (x right, y away from the camera base, z up).
+# Placed close to where the arms usually work, but not on their path, so most
+# steps are low risk and close passes stand out.
+# In a deployment this list would come from a detector on the camera feed.
+# The pretrained policy was never trained with these and cannot see them.
+extent: 1.2
+unit: m
+robot_radius: 0.02      # padding around each tracked point on the arm
+speed_ref: 0.01         # metres per control step treated as full speed (0.5 m/s at 50 Hz)
+proximity_scale: 0.04   # metres
+hazards:
+  - {name: operator hand, kind: person, center: [0.25, 0.33, 0.12], radius: 0.06, severity: 3}
+  - {name: glass, kind: fragile, center: [0.0, 0.62, 0.30], radius: 0.05, severity: 2}
