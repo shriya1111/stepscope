@@ -69,6 +69,9 @@ def test_gate_joint_step_and_limits():
     d = gate.check(np.array([0.0, low + 1, 60, 0, 0, 50]), np.array([0.0, -4, 0, 0, 0, 0]))
     assert d.verdict == "clamp" and d.action[1] == pytest.approx(-1)
     assert gate.check(q, np.array([1.0, 1, 1, 0, 0, 0])).verdict == "allow"
+    # the gripper is in different units: closing it fully in one step must not slow the arm
+    d = gate.check(q, np.array([3.0, 0, 0, 0, 0, -50]))
+    assert d.verdict == "allow" and d.action[0] == 3.0
 
 
 def test_cartesian_constraints_need_kinematics():

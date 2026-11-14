@@ -77,11 +77,15 @@ def gate_config(kin: Kinematics) -> dict:
     """Limits for the simulated arms: joint speed, joint range, and a box the arms must stay inside."""
     low, high = np.full(14, -np.inf), np.full(14, np.inf)
     low[ARM_JOINTS], high[ARM_JOINTS] = kin.joint_low, kin.joint_high
+    # Arm joints are in radians. The two gripper commands (indices 6 and 13) are a 0-to-1
+    # opening, where a full open or close in one step is normal, so they get no speed limit.
+    step = np.full(14, 10.0)
+    step[ARM_JOINTS] = 0.25
     return {
         "position_dims": list(range(14)),
         "delta_dims": list(range(14)),
         "constraints": [
-            {"type": "max_joint_step", "name": "joint_speed", "max_abs": 0.25},
+            {"type": "max_joint_step", "name": "joint_speed", "max_abs": step.tolist()},
             {"type": "joint_limits", "name": "joint_range", "low": low.tolist(), "high": high.tolist()},
             {"type": "cartesian_box", "name": "workspace", "low": [-0.95, -0.2, -0.02], "high": [0.95, 1.3, 1.0]},
         ],

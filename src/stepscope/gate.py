@@ -155,10 +155,14 @@ class Gate:
 
             elif kind == "max_joint_step":
                 # No single joint may move more than this in one step; the whole move is scaled to keep its direction.
-                biggest = float(np.abs(delta).max()) if len(delta) else 0.0
-                if biggest > c["max_abs"] + 1e-12:
-                    violations.append({"constraint": c["name"], "detail": f"joint step {biggest:.3f} > {c['max_abs']}"})
-                    delta = delta * (c["max_abs"] / biggest)
+                # max_abs is one number for every joint, or a list with one limit per joint
+                # (joints in different units, such as a gripper, need their own).
+                limit = np.broadcast_to(np.asarray(c["max_abs"], dtype=float), delta.shape)
+                over = np.abs(delta) / limit
+                worst = int(over.argmax()) if len(delta) else 0
+                if len(delta) and over[worst] > 1 + 1e-12:
+                    violations.append({"constraint": c["name"], "detail": f"joint {worst} step {abs(delta[worst]):.3f} > {limit[worst]:g}"})
+                    delta = delta / over[worst]
                     escalate("clamp")
 
             elif kind == "joint_limits":

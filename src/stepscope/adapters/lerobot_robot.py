@@ -96,7 +96,8 @@ def so101_gate(
     a, b = joint_map.from_model(kin.joint_low), joint_map.from_model(kin.joint_high)
     low, high = np.append(np.minimum(a, b), 0.0), np.append(np.maximum(a, b), 100.0)
     constraints: list[dict] = [
-        {"type": "max_joint_step", "name": "joint_speed", "max_abs": max_step_deg},
+        # five arm joints in degrees; the gripper (0 to 100) may open or close fully in one step
+        {"type": "max_joint_step", "name": "joint_speed", "max_abs": [max_step_deg] * 5 + [100.0]},
         {"type": "joint_limits", "name": "joint_range", "low": low.tolist(), "high": high.tolist()},
     ]
     if workspace:
