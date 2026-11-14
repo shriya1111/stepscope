@@ -29,7 +29,7 @@ stepscope = "stepscope.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-stepscope = ["viewer/*"]
+stepscope = ["viewer/*", "models/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

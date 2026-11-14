@@ -25,10 +25,12 @@ class Decision:
     verdict: str = "allow"  # allow | clamp | block | halt
     violations: list[dict[str, Any]] = field(default_factory=list)
     risk: float = float("nan")
+    shadow: bool = False  # True: the verdict is advisory and `action` is the policy's own action
 
     @property
     def halt(self) -> bool:
-        return self.verdict == "halt"
+        """True when the gate says to stop the episode (never in shadow mode)."""
+        return self.verdict == "halt" and not self.shadow
 
     @property
     def intervened(self) -> bool:

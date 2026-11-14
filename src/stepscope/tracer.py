@@ -35,11 +35,16 @@ class Tracer:
         gate: Gate | None = None,
         predictor: Predictor | None = None,
         run_meta: dict | None = None,
+        shadow: bool = False,
     ):
+        """shadow=True: the gate still judges every action and its verdict is
+        recorded, but the action is returned unchanged. Use it to see what the
+        gate would do on a real robot before letting it act."""
         self.run_dir = Path(run_dir)
         self.config = config or TraceConfig()
         self.gate = gate
         self.predictor = predictor
+        self.shadow = shadow
         (self.run_dir / "episodes").mkdir(parents=True, exist_ok=True)
         self._count = sum(1 for _ in (self.run_dir / "episodes").iterdir())
         dump_json(
@@ -49,6 +54,7 @@ class Tracer:
                 "created_at": time.time(),
                 "config": self.config.to_dict(),
                 "gate": gate.config if gate else None,
+                "shadow": shadow,
                 "alert": {"threshold": predictor.threshold, "sustain": predictor.sustain} if predictor else None,
                 **(run_meta or {}),
             },
@@ -141,6 +147,8 @@ class EpisodeTrace:
             decision = tr.gate.check(state, action, risk)
         else:
             decision = Decision(action=action.copy(), risk=risk)
+        if tr.shadow:  # keep the verdict, hand back the action untouched
+            decision = Decision(action=action.copy(), verdict=decision.verdict, violations=decision.violations, risk=risk, shadow=True)
         self._metrics.record_intervention(decision.intervened)
 
         row = {
