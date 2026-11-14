@@ -15,20 +15,23 @@ import numpy as np
 from .store import dump_json
 
 
-def occlusion_batch(frames: np.ndarray, grid: int, fill: int = 255) -> np.ndarray:
-    """Every way of hiding one cell of a grid x grid tiling in each frame.
+def occlusion_batch(frames: np.ndarray, grid, fill=255) -> np.ndarray:
+    """Every way of hiding one cell of a grid tiling in each frame.
 
-    frames: (F, H, W, 3). Returns (F * grid * grid, F, H, W, 3): variant
-    f*grid*grid + gy*grid + gx hides cell (gy, gx) of frame f only.
+    frames: (F, H, W, 3). grid: an int (square tiling) or (rows, cols). fill: a
+    grey level or an RGB colour to paint the hidden cell with.
+    Returns (F * rows * cols, F, H, W, 3): variant f*rows*cols + gy*cols + gx
+    hides cell (gy, gx) of frame f only.
     """
+    rows, cols = (grid, grid) if isinstance(grid, int) else grid
     F, H, W, _ = frames.shape
-    out = np.repeat(frames[None], F * grid * grid, axis=0).copy()
-    ys = np.linspace(0, H, grid + 1).astype(int)
-    xs = np.linspace(0, W, grid + 1).astype(int)
+    out = np.repeat(frames[None], F * rows * cols, axis=0).copy()
+    ys = np.linspace(0, H, rows + 1).astype(int)
+    xs = np.linspace(0, W, cols + 1).astype(int)
     i = 0
     for f in range(F):
-        for gy in range(grid):
-            for gx in range(grid):
+        for gy in range(rows):
+            for gx in range(cols):
                 out[i, f, ys[gy] : ys[gy + 1], xs[gx] : xs[gx + 1]] = fill
                 i += 1
     return out
@@ -72,6 +75,6 @@ def read_deepdive(ep_dir: Path, compact: bool = False) -> dict | None:
     decisions = json.loads(path.read_text())["decisions"]
     if compact:
         for d in decisions.values():
-            if "stages" in d:
+            if d.get("stages") is not None:  # models that plan in one pass have no stages
                 d["stages"] = np.round(np.asarray(d["stages"])[:, :, ::2]).astype(int).tolist()
     return decisions
